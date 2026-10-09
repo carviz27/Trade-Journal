@@ -9,7 +9,8 @@ export interface TradeImage {
 export interface Trade {
   id: string;
   date: string; // YYYY-MM-DD
-  time: string; // HH:MM
+  time: string; // hora de entrada HH:MM ou HH:MM:SS
+  exitTime?: string; // hora de saída
   symbol: string;
   side: Side;
   entry: number | null;

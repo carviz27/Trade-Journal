@@ -109,7 +109,8 @@ export default function TradeForm() {
           <h3>Detalhes</h3>
           <div className="fields">
             <label>Data<input type="date" required value={t.date} onChange={(e) => up({ date: e.target.value })} /></label>
-            <label>Hora<input type="time" value={t.time} onChange={(e) => up({ time: e.target.value })} /></label>
+            <label>Hora de entrada<input type="time" step={1} value={t.time} onChange={(e) => up({ time: e.target.value })} /></label>
+            <label>Hora de saída<input type="time" step={1} value={t.exitTime ?? ''} onChange={(e) => up({ exitTime: e.target.value })} /></label>
             <label>Símbolo<input required placeholder="ES, NQ, EURUSD…" value={t.symbol} onChange={(e) => up({ symbol: e.target.value })} /></label>
             <label>
               Lado

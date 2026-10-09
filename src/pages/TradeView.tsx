@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useStore } from '../store';
 import ConfirmButton from '../components/ConfirmButton';
-import { fmtDate, fmtMoney, pnlClass } from '../utils';
+import { fmtDate, fmtDuration, fmtMoney, pnlClass, tradeDuration } from '../utils';
 
 export default function TradeView() {
   const { id } = useParams();
@@ -26,7 +26,7 @@ export default function TradeView() {
           <h1>
             {t.symbol} <span className={`tag ${t.side}`}>{t.side.toUpperCase()}</span>
           </h1>
-          <span className="muted">{fmtDate(t.date)} · {t.time}</span>
+          <span className="muted">{fmtDate(t.date)} · {t.time}{t.exitTime ? ` → ${t.exitTime}` : ''}</span>
         </div>
         <div className="row gap">
           <ConfirmButton className="btn danger" confirmLabel="Clica de novo para apagar" onConfirm={remove}>Apagar</ConfirmButton>
@@ -57,6 +57,7 @@ export default function TradeView() {
         <div className="stat"><span>Entrada</span><strong>{t.entry ?? '—'}</strong></div>
         <div className="stat"><span>Saída</span><strong>{t.exit ?? '—'}</strong></div>
         <div className="stat"><span>Quantidade</span><strong>{t.quantity ?? '—'}</strong></div>
+        <div className="stat"><span>Duração</span><strong>{fmtDuration(tradeDuration(t))}</strong></div>
         <div className="stat"><span>Comissões</span><strong>{fmtMoney(t.fees)}</strong></div>
         <div className="stat"><span>Setup</span><strong>{t.setup || '—'}</strong></div>
         <div className="stat"><span>Execução</span><strong className="stars-static">{'★'.repeat(t.rating)}{'☆'.repeat(5 - t.rating)}</strong></div>

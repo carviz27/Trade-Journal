@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
-import { bucketize, computeStats, fmtDate, fmtMoney, fmtPct, pnlClass, toDateStr, todayStr } from '../utils';
+import { bucketize, computeStats, fmtDate, fmtMoney, fmtPct, parseDate, pnlClass, toDateStr, todayStr } from '../utils';
 import TradeTable from '../components/TradeTable';
+import TradingHistory from '../components/TradingHistory';
 
 const WEEKDAYS = ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB'];
 
@@ -40,6 +41,13 @@ export default function CalendarPage() {
   const shift = (n: number) => {
     setMonth(new Date(month.getFullYear(), month.getMonth() + n, 1));
     setSelected(null);
+  };
+
+  const pickDay = (date: string) => {
+    const d = parseDate(date);
+    setMonth(new Date(d.getFullYear(), d.getMonth(), 1));
+    setSelected(date);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const today = todayStr();
@@ -156,6 +164,7 @@ export default function CalendarPage() {
           )}
         </div>
       )}
+      <TradingHistory trades={trades} selected={selected} onSelect={pickDay} />
     </div>
   );
 }

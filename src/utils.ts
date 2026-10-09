@@ -175,3 +175,81 @@ export function readFileAsDataUrl(file: File): Promise<string> {
     r.readAsDataURL(file);
   });
 }
+
+const toSeconds = (hms: string) => {
+  const [h = 0, m = 0, sec = 0] = hms.split(':').map(Number);
+  return h * 3600 + m * 60 + sec;
+};
+
+// duração da trade em segundos (null se não houver hora de saída)
+export function tradeDuration(t: Trade): number | null {
+  if (!t.time || !t.exitTime) return null;
+  let d = toSeconds(t.exitTime) - toSeconds(t.time);
+  if (d < 0) d += 24 * 3600; // passou a meia-noite
+  return d;
+}
+
+export function fmtDuration(sec: number | null): string {
+  if (sec === null) return '—';
+  const s = Math.round(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  return h ? `${h} h ${m} min` : `${m} min ${r} sec`;
+}
+
+export interface DayHistory {
+  date: string;
+  symbols: string[];
+  net: number;
+  high: number;
+  low: number;
+  qty: number;
+  fees: number;
+  avgWin: number;
+  avgLoss: number;
+  winDuration: number | null;
+  lossDuration: number | null;
+  winRate: number;
+  trades: number;
+}
+
+const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+
+// uma linha por dia: P&L acumulado máximo/mínimo ao longo do dia, médias e durações
+export function dailyHistory(trades: Trade[]): DayHistory[] {
+  const byDay = new Map<string, Trade[]>();
+  for (const t of sortTrades(trades)) {
+    const list = byDay.get(t.date) ?? [];
+    list.push(t);
+    byDay.set(t.date, list);
+  }
+  return [...byDay.entries()]
+    .map(([date, ts]) => {
+      let eq = 0, high = 0, low = 0;
+      for (const t of ts) {
+        eq += t.pnl;
+        high = Math.max(high, eq);
+        low = Math.min(low, eq);
+      }
+      const wins = ts.filter((t) => t.pnl > 0);
+      const losses = ts.filter((t) => t.pnl < 0);
+      const durs = (xs: Trade[]) => xs.map(tradeDuration).filter((d): d is number => d !== null);
+      return {
+        date,
+        symbols: [...new Set(ts.map((t) => t.symbol))],
+        net: eq,
+        high,
+        low,
+        qty: ts.reduce((a, t) => a + (t.quantity ?? 0), 0),
+        fees: ts.reduce((a, t) => a + t.fees, 0),
+        avgWin: avg(wins.map((t) => t.pnl)) ?? 0,
+        avgLoss: avg(losses.map((t) => t.pnl)) ?? 0,
+        winDuration: avg(durs(wins)),
+        lossDuration: avg(durs(losses)),
+        winRate: (wins.length / ts.length) * 100,
+        trades: ts.length,
+      };
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
+}

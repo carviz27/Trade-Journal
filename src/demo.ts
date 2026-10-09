@@ -24,7 +24,8 @@ export function makeDemoTrades(settings: Settings): Trade[] {
       trades.push({
         id: uid(),
         date: toDateStr(d),
-        time: `${String(14 + k).padStart(2, '0')}:${String(Math.floor(Math.random() * 60)).padStart(2, '0')}`,
+        time: `${String(14 + k).padStart(2, '0')}:${String(Math.floor(Math.random() * 30)).padStart(2, '0')}:00`,
+        exitTime: `${String(14 + k).padStart(2, '0')}:${String(30 + Math.floor(Math.random() * 29)).padStart(2, '0')}:${String(Math.floor(Math.random() * 60)).padStart(2, '0')}`,
         symbol: SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)],
         side: Math.random() < 0.5 ? 'long' : 'short',
         entry: null,

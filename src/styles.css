@@ -258,3 +258,14 @@ kbd { background: #222; border: 1px solid #333; border-radius: 4px; padding: 1px
 @media (max-width: 700px) {
   .post-images.n2, .post-images.n3 { grid-template-columns: 1fr; }
 }
+
+/* trading history */
+.mono, .mono-table td { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+.small { font-size: 11px; }
+.history .card-head { margin-bottom: 8px; }
+.history-wrap { max-height: 520px; border: 1px solid var(--border); border-radius: 8px; }
+.sym { display: inline-block; background: #1f1f1f; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 7px; font-size: 11px; font-weight: 600; margin-right: 4px; color: #cfcfcf; }
+.wr { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; border: 1px solid; }
+.wr.good { color: var(--green); border-color: var(--green-border); background: var(--green-bg); }
+.wr.bad { color: var(--red); border-color: var(--red-border); background: var(--red-bg); }
+.table tbody tr.row-selected { background: #1a1a1a; }
