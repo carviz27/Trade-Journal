@@ -220,3 +220,5 @@ kbd { background: #222; border: 1px solid #333; border-radius: 4px; padding: 1px
 }
 .table-wrap.scroll { max-height: 420px; overflow-y: auto; }
 .table-wrap.scroll thead th { position: sticky; top: 0; background: var(--panel); }
+.btn.armed { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+.notice { margin-top: 12px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 8px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }

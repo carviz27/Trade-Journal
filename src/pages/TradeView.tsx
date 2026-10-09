@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useStore } from '../store';
+import ConfirmButton from '../components/ConfirmButton';
 import { fmtDate, fmtMoney, pnlClass } from '../utils';
 
 export default function TradeView() {
@@ -12,10 +13,8 @@ export default function TradeView() {
   if (!t) return <div className="page muted">Trade não encontrada.</div>;
 
   const remove = () => {
-    if (confirm('Apagar esta trade?')) {
-      deleteTrade(t.id);
-      navigate('/trades');
-    }
+    deleteTrade(t.id);
+    navigate('/trades');
   };
 
   return (
@@ -28,7 +27,7 @@ export default function TradeView() {
           <span className="muted">{fmtDate(t.date)} · {t.time}</span>
         </div>
         <div className="row gap">
-          <button className="btn danger" onClick={remove}>Apagar</button>
+          <ConfirmButton className="btn danger" confirmLabel="Clica de novo para apagar" onConfirm={remove}>Apagar</ConfirmButton>
           <button className="btn primary" onClick={() => navigate(`/trades/${t.id}/edit`)}>Editar</button>
         </div>
       </div>

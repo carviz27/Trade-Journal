@@ -2,11 +2,14 @@ import { useState } from 'react';
 import { useStore } from '../store';
 import ListEditor from '../components/ListEditor';
 import { makeDemoTrades } from '../demo';
+import ConfirmButton from '../components/ConfirmButton';
 import { todayStr, uid } from '../utils';
 
 export default function SettingsPage() {
   const { settings, setSettings, trades, replaceAll } = useStore();
   const [newItem, setNewItem] = useState('');
+  const [msg, setMsg] = useState('');
+  const [pending, setPending] = useState<{ trades: typeof trades; settings: typeof settings } | null>(null);
 
   const setChecklist = (checklist: typeof settings.checklist) => setSettings({ ...settings, checklist });
   const addItem = () => {
@@ -22,8 +25,19 @@ export default function SettingsPage() {
     setChecklist(c);
   };
 
+  const backupJson = () => JSON.stringify({ version: 1, trades, settings }, null, 2);
+
+  const copyJson = async () => {
+    try {
+      await navigator.clipboard.writeText(backupJson());
+      setMsg('Backup copiado. Cola-o num ficheiro .json para o guardar.');
+    } catch {
+      setMsg('Não foi possível copiar. Usa "Exportar backup".');
+    }
+  };
+
   const exportJson = () => {
-    const blob = new Blob([JSON.stringify({ version: 1, trades, settings }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([backupJson()], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `trade-journal-${todayStr()}.json`;
@@ -35,10 +49,11 @@ export default function SettingsPage() {
     try {
       const data = JSON.parse(await file.text());
       if (!Array.isArray(data.trades) || !data.settings) throw new Error();
-      if (confirm(`Importar ${data.trades.length} trades? Isto substitui os dados atuais.`))
-        replaceAll(data.trades, data.settings);
+      setPending({ trades: data.trades, settings: data.settings });
+      setMsg('');
     } catch {
-      alert('Ficheiro inválido.');
+      setPending(null);
+      setMsg('Este ficheiro não é um backup válido do Trade Journal.');
     }
   };
 
@@ -90,18 +105,35 @@ export default function SettingsPage() {
           <button className="btn" onClick={exportJson}>Exportar backup (JSON)</button>
           <label className="btn">
             Importar backup
-            <input type="file" accept="application/json" hidden onChange={(e) => e.target.files?.[0] && importJson(e.target.files[0])} />
+            <input type="file" accept="application/json" hidden onChange={(e) => { if (e.target.files?.[0]) importJson(e.target.files[0]); e.target.value = ''; }} />
           </label>
-          <button
-            className="btn"
-            onClick={() => confirm('Adicionar ~3 meses de trades de exemplo?') && replaceAll([...trades, ...makeDemoTrades(settings)], settings)}
-          >
+          <button className="btn" onClick={copyJson}>Copiar backup</button>
+          <ConfirmButton confirmLabel="Clica de novo para adicionar" onConfirm={() => replaceAll([...trades, ...makeDemoTrades(settings)], settings)}>
             Carregar dados de exemplo
-          </button>
-          <button className="btn danger" onClick={() => confirm('Apagar TODAS as trades?') && replaceAll([], settings)}>
+          </ConfirmButton>
+          <ConfirmButton className="btn danger" confirmLabel="Clica de novo para apagar tudo" onConfirm={() => replaceAll([], settings)}>
             Apagar todas as trades
-          </button>
+          </ConfirmButton>
         </div>
+        {pending && (
+          <div className="notice">
+            <span>Importar {pending.trades.length} trades? Isto substitui os dados atuais.</span>
+            <div className="row gap">
+              <button className="btn" onClick={() => setPending(null)}>Cancelar</button>
+              <button
+                className="btn primary"
+                onClick={() => {
+                  replaceAll(pending.trades, pending.settings);
+                  setPending(null);
+                  setMsg('Backup importado.');
+                }}
+              >
+                Importar
+              </button>
+            </div>
+          </div>
+        )}
+        {msg && <p className="muted mt-s">{msg}</p>}
       </div>
     </div>
   );
