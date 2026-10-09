@@ -232,3 +232,29 @@ kbd { background: #222; border: 1px solid #333; border-radius: 4px; padding: 1px
 .gallery-thumbs button { flex: 0 0 auto; width: 140px; padding: 0; border: 2px solid transparent; border-radius: 6px; background: none; cursor: pointer; opacity: 0.6; }
 .gallery-thumbs button.on, .gallery-thumbs button:hover { border-color: var(--green); opacity: 1; }
 .gallery-thumbs img { display: block; width: 100%; height: 80px; object-fit: cover; border-radius: 4px; }
+
+/* feed de trades */
+.feed { display: flex; flex-direction: column; gap: 22px; max-width: 1100px; width: 100%; }
+.feed-day { display: flex; flex-direction: column; gap: 10px; }
+.feed-sep { display: flex; align-items: center; gap: 12px; font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; }
+.feed-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); order: 1; }
+.feed-sep span:last-child { order: 2; font-variant-numeric: tabular-nums; }
+.post { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.post-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.post-title { display: flex; align-items: center; gap: 10px; background: none; border: 0; padding: 0; cursor: pointer; font-size: 15px; }
+.post-title:hover strong { text-decoration: underline; }
+.post-right { display: flex; align-items: center; gap: 12px; }
+.post-pnl { font-size: 17px; font-variant-numeric: tabular-nums; }
+.post-notes { margin: 0; white-space: pre-wrap; line-height: 1.6; max-width: 80ch; }
+.post-images { display: grid; gap: 6px; }
+.post-images.n1 { grid-template-columns: 1fr; }
+.post-images.n2 { grid-template-columns: repeat(2, 1fr); }
+.post-images.n3 { grid-template-columns: repeat(3, 1fr); }
+.post-images figure { margin: 0; cursor: zoom-in; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.post-images img { width: 100%; border-radius: 6px; border: 1px solid var(--border); background: #080808; }
+.post-images.n1 img { max-height: 70vh; object-fit: contain; }
+.post-images figcaption { font-size: 12px; color: var(--muted); }
+.post-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+@media (max-width: 700px) {
+  .post-images.n2, .post-images.n3 { grid-template-columns: 1fr; }
+}
