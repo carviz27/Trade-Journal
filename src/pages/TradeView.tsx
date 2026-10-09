@@ -9,8 +9,10 @@ export default function TradeView() {
   const { trades, settings, deleteTrade } = useStore();
   const navigate = useNavigate();
   const [zoom, setZoom] = useState<string | null>(null);
+  const [active, setActive] = useState(0);
   const t = trades.find((x) => x.id === id);
   if (!t) return <div className="page muted">Trade não encontrada.</div>;
+  const current = t.images[Math.min(active, t.images.length - 1)];
 
   const remove = () => {
     deleteTrade(t.id);
@@ -31,6 +33,24 @@ export default function TradeView() {
           <button className="btn primary" onClick={() => navigate(`/trades/${t.id}/edit`)}>Editar</button>
         </div>
       </div>
+
+      {t.images.length > 0 && (
+        <div className="card gallery">
+          <figure className="gallery-main" onClick={() => setZoom(current.dataUrl)}>
+            <img src={current.dataUrl} alt={current.caption} />
+            {current.caption && <figcaption>{current.caption}</figcaption>}
+          </figure>
+          {t.images.length > 1 && (
+            <div className="gallery-thumbs">
+              {t.images.map((img, i) => (
+                <button key={img.id} className={i === active ? 'on' : ''} onClick={() => setActive(i)}>
+                  <img src={img.dataUrl} alt={img.caption} />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="stat-grid">
         <div className="stat"><span>P&L</span><strong className={pnlClass(t.pnl)}>{fmtMoney(t.pnl)}</strong></div>
@@ -67,20 +87,6 @@ export default function TradeView() {
         <h3>Notas</h3>
         <p className="notes">{t.notes || <span className="muted">Sem notas.</span>}</p>
       </div>
-
-      {t.images.length > 0 && (
-        <div className="card">
-          <h3>Imagens</h3>
-          <div className="images">
-            {t.images.map((img) => (
-              <figure key={img.id} className="image-item" onClick={() => setZoom(img.dataUrl)}>
-                <img src={img.dataUrl} alt={img.caption} />
-                {img.caption && <figcaption>{img.caption}</figcaption>}
-              </figure>
-            ))}
-          </div>
-        </div>
-      )}
 
       {zoom && (
         <div className="lightbox" onClick={() => setZoom(null)}>
