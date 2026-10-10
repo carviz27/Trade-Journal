@@ -186,7 +186,7 @@ export default function PropFirmsPage() {
             )}
             <label>Conta<input placeholder="Ex.: 50K #2" value={editing.account} onChange={(e) => up({ account: e.target.value })} /></label>
             <label>Valor ($)<input required inputMode="decimal" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
-            <label className="span-2">Notas<input placeholder="Ex.: código de desconto 80%" value={editing.notes} onChange={(e) => up({ notes: e.target.value })} /></label>
+            <label className="span-2">Notas<input placeholder={editing.type === 'expense' ? 'Ex.: código de desconto 80%' : 'Ex.: primeiro payout desta conta'} value={editing.notes} onChange={(e) => up({ notes: e.target.value })} /></label>
           </div>
           <div className="row gap mt-s">
             <button type="submit" className="btn primary">Guardar</button>
@@ -195,7 +195,7 @@ export default function PropFirmsPage() {
         </form>
       )}
 
-      <div className="stat-grid">
+      <div className="stat-grid four">
         <div className="stat big"><span>Lucro líquido</span><strong className={pnlClass(s.net)}>{fmtMoney(s.net)}</strong><small className="muted">payouts − despesas</small></div>
         <div className="stat big"><span>ROI</span><strong className={pnlClass(s.roi ?? 0)}>{fmtRoi(s.roi)}</strong><small className="muted">sobre o total gasto</small></div>
         <div className="stat"><span>Total gasto</span><strong className="neg">{fmtMoney(-s.expenses)}</strong></div>
