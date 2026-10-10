@@ -7,12 +7,14 @@ import TradeView from './pages/TradeView';
 import PerformancePage from './pages/PerformancePage';
 import MistakesPage from './pages/MistakesPage';
 import SettingsPage from './pages/SettingsPage';
+import PropFirmsPage from './pages/PropFirmsPage';
 
 const NAV = [
   { to: '/', label: 'Calendário', end: true },
   { to: '/performance', label: 'Performance' },
   { to: '/trades', label: 'Trades' },
   { to: '/mistakes', label: 'Mistakes' },
+  { to: '/prop-firms', label: 'Prop Firms' },
   { to: '/settings', label: 'Definições' },
 ];
 
@@ -46,6 +48,7 @@ export default function App() {
             <Route path="/trades/:id" element={<TradeView />} />
             <Route path="/trades/:id/edit" element={<TradeForm />} />
             <Route path="/mistakes" element={<MistakesPage />} />
+            <Route path="/prop-firms" element={<PropFirmsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         )}

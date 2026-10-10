@@ -269,3 +269,9 @@ kbd { background: #222; border: 1px solid #333; border-radius: 4px; padding: 1px
 .wr.good { color: var(--green); border-color: var(--green-border); background: var(--green-bg); }
 .wr.bad { color: var(--red); border-color: var(--red-border); background: var(--red-bg); }
 .table tbody tr.row-selected { background: #1a1a1a; }
+
+/* prop firms */
+.gap-s { gap: 6px; justify-content: flex-end; }
+.span-2 { grid-column: span 2; }
+.cell-notes { white-space: normal; max-width: 280px; font-size: 13px; }
+@media (max-width: 700px) { .span-2 { grid-column: auto; } }

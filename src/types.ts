@@ -37,3 +37,16 @@ export interface Settings {
   mistakes: string[];
   setups: string[];
 }
+
+export type PropTxType = 'expense' | 'payout';
+
+export interface PropTx {
+  id: string;
+  date: string; // YYYY-MM-DD
+  firm: string;
+  type: PropTxType;
+  category: string; // ex.: Avaliação, Reset, Ativação (só despesas)
+  account: string; // ex.: 50K #2 (opcional)
+  amount: number; // sempre positivo
+  notes: string;
+}

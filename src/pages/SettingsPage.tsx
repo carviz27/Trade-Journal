@@ -6,10 +6,10 @@ import ConfirmButton from '../components/ConfirmButton';
 import { todayStr, uid } from '../utils';
 
 export default function SettingsPage() {
-  const { settings, setSettings, trades, replaceAll } = useStore();
+  const { settings, setSettings, trades, replaceAll, propTx } = useStore();
   const [newItem, setNewItem] = useState('');
   const [msg, setMsg] = useState('');
-  const [pending, setPending] = useState<{ trades: typeof trades; settings: typeof settings } | null>(null);
+  const [pending, setPending] = useState<{ trades: typeof trades; settings: typeof settings; propTx?: typeof propTx } | null>(null);
 
   const setChecklist = (checklist: typeof settings.checklist) => setSettings({ ...settings, checklist });
   const addItem = () => {
@@ -25,7 +25,7 @@ export default function SettingsPage() {
     setChecklist(c);
   };
 
-  const backupJson = () => JSON.stringify({ version: 1, trades, settings }, null, 2);
+  const backupJson = () => JSON.stringify({ version: 2, trades, settings, propTx }, null, 2);
 
   const copyJson = async () => {
     try {
@@ -49,7 +49,7 @@ export default function SettingsPage() {
     try {
       const data = JSON.parse(await file.text());
       if (!Array.isArray(data.trades) || !data.settings) throw new Error();
-      setPending({ trades: data.trades, settings: data.settings });
+      setPending({ trades: data.trades, settings: data.settings, propTx: Array.isArray(data.propTx) ? data.propTx : undefined });
       setMsg('');
     } catch {
       setPending(null);
@@ -123,7 +123,7 @@ export default function SettingsPage() {
               <button
                 className="btn primary"
                 onClick={() => {
-                  replaceAll(pending.trades, pending.settings);
+                  replaceAll(pending.trades, pending.settings, pending.propTx);
                   setPending(null);
                   setMsg('Backup importado.');
                 }}
