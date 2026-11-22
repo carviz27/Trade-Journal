@@ -52,14 +52,7 @@ grpCalc   = "Calculation"
 tradeDir = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = grpStrat,
      tooltip = "Both: long nos POCs abaixo do preço e short nos POCs acima. Long only / Short only: só coloca as ordens desse lado.")
 nTradeLevels = input.int(3, "POCs per timeframe", minval = 1, maxval = 20, group = grpStrat,
-     tooltip = "Quantos POCs de cada timeframe (os mais próximos do preço) entram na estratégia. Todos os POCs são tratados por igual (New, Naked e Tapped não fazem diferença): cada preço de POC só é negociado uma vez.")
-trade1D = input.bool(true, "1D", group = grpStrat, inline = "trTF1")
-trade2D = input.bool(true, "2D", group = grpStrat, inline = "trTF1")
-trade3D = input.bool(true, "3D", group = grpStrat, inline = "trTF1")
-trade5D = input.bool(true, "5D", group = grpStrat, inline = "trTF1")
-trade1W = input.bool(true, "1W", group = grpStrat, inline = "trTF2")
-trade2W = input.bool(true, "2W", group = grpStrat, inline = "trTF2")
-trade1M = input.bool(true, "1M", group = grpStrat, inline = "trTF2")
+     tooltip = "Quantos POCs de cada timeframe (os mais próximos do preço) entram na estratégia. Todos os POCs são tratados por igual. Só são negociados os POCs que estão LIGADOS nos grupos 'Timeframes - New / Naked / Tapped': o que desligares deixa de aparecer E deixa de ser negociado.")
 grpZone = "POC zones (clusters)"
 clusterPct = input.float(0.4, "Cluster distance %", minval = 0.0, step = 0.05, group = grpZone,
      tooltip = "POCs a menos desta distância (%) do POC vizinho juntam-se na mesma zona. 0 = cada POC é uma zona sozinho (comportamento antigo).")
@@ -163,6 +156,7 @@ nakedShow1M = input.bool(true, "1M", group = grpNaked, inline = "nk2")
 nakedUpdateTick = input.bool(false, "Update on every tick", group = grpNaked)
 
 tappedColor  = input.color(color.new(#9c87be, 0), "Tapped - color", group = grpTapped, inline = "tp0")
+tappedShow1D = input.bool(true, "1D", group = grpTapped, inline = "tp1")
 tappedShow2D = input.bool(true, "2D", group = grpTapped, inline = "tp1")
 tappedShow3D = input.bool(true, "3D", group = grpTapped, inline = "tp1")
 tappedShow5D = input.bool(true, "5D", group = grpTapped, inline = "tp1")
@@ -368,7 +362,7 @@ newTF(string name, bool showNew, bool showNaked, bool showTapped, int maxVisible
          nakedPrices = array.new<float>(), tappedPrices = array.new<float>(), tappedTaps = array.new<int>(),
          nakedLines = array.new<line>(), tradeSel = array.new<float>())
 
-var TFState st1D = newTF("1D", newShow1D, nakedShow1D, false,        3, true)
+var TFState st1D = newTF("1D", newShow1D, nakedShow1D, tappedShow1D, 3, true)
 var TFState st2D = newTF("2D", newShow2D, nakedShow2D, tappedShow2D, 3, true)
 var TFState st3D = newTF("3D", newShow3D, nakedShow3D, tappedShow3D, 3, true)
 var TFState st5D = newTF("5D", newShow5D, nakedShow5D, tappedShow5D, 3, true)
@@ -385,6 +379,7 @@ var array<float> sel1W = array.new<float>(2, na)
 var array<float> sel2W = array.new<float>(2, na)
 var array<float> sel1M = array.new<float>(2, na)
 
+var float selTp1D = na
 var float selTp2D = na
 var float selTp3D = na
 var float selTp5D = na
@@ -599,6 +594,7 @@ refreshNaked(float ref) =>
 if nakedLive
     refreshNaked(close)
 if tappedLive
+    selTp1D := updateTappedSel(st1D, close)
     selTp2D := updateTappedSel(st2D, close)
     selTp3D := updateTappedSel(st3D, close)
     selTp5D := updateTappedSel(st5D, close)
@@ -610,6 +606,7 @@ if hadNewDay
     if not nakedLive
         refreshNaked(dC)
     if not tappedLive
+        selTp1D := updateTappedSel(st1D, dC)
         selTp2D := updateTappedSel(st2D, dC)
         selTp3D := updateTappedSel(st3D, dC)
         selTp5D := updateTappedSel(st5D, dC)
@@ -1023,14 +1020,16 @@ if useConfirm
 priceKey(float p) =>
     "P|" + str.tostring(p, format.mintick)
 
-buildTradeSel(TFState st, bool on, float ref) =>
+buildTradeSel(TFState st, float ref) =>
     pool = array.new<float>()
-    if on
-        if st.hasNew and not map.contains(traded, priceKey(st.newPrice))
-            array.push(pool, st.newPrice)
+    // Só entram os tipos ligados nas settings (o que não aparece não é negociado).
+    if st.showNew and st.hasNew and not map.contains(traded, priceKey(st.newPrice))
+        array.push(pool, st.newPrice)
+    if st.showNaked
         for p in st.nakedPrices
             if not map.contains(traded, priceKey(p))
                 array.push(pool, p)
+    if st.showTapped and st.hasTapped
         for p in st.tappedPrices
             if not map.contains(traded, priceKey(p))
                 array.push(pool, p)
@@ -1039,13 +1038,13 @@ buildTradeSel(TFState st, bool on, float ref) =>
 if hadNewDay or nakedLive or tappedLive
     needSel := true
 if needSel
-    buildTradeSel(st1D, trade1D, close)
-    buildTradeSel(st2D, trade2D, close)
-    buildTradeSel(st3D, trade3D, close)
-    buildTradeSel(st5D, trade5D, close)
-    buildTradeSel(st1W, trade1W, close)
-    buildTradeSel(st2W, trade2W, close)
-    buildTradeSel(st1M, trade1M, close)
+    buildTradeSel(st1D, close)
+    buildTradeSel(st2D, close)
+    buildTradeSel(st3D, close)
+    buildTradeSel(st5D, close)
+    buildTradeSel(st1W, close)
+    buildTradeSel(st2W, close)
+    buildTradeSel(st1M, close)
     needSel := false
 
 candKey = array.new<string>()
@@ -1259,7 +1258,7 @@ drawTF(TFState st, array<float> nakedSel, float tappedSel) =>
             st.lineTapped := drawLevel(tappedColor, tappedSel)
 
 if barstate.islast
-    drawTF(st1D, sel1D, float(na))
+    drawTF(st1D, sel1D, selTp1D)
     drawTF(st2D, sel2D, selTp2D)
     drawTF(st3D, sel3D, selTp3D)
     drawTF(st5D, sel5D, selTp5D)
@@ -1302,6 +1301,7 @@ plot(array.get(sel2W, 1), title = "2W", color = nakedColor, display = display.pr
 plot(array.get(sel1M, 0), title = "1M", color = nakedColor, display = display.price_scale)
 plot(array.get(sel1M, 1), title = "1M", color = nakedColor, display = display.price_scale)
 
+plot(selTp1D, title = "1DT", color = tappedColor, display = display.price_scale)
 plot(selTp2D, title = "2DT", color = tappedColor, display = display.price_scale)
 plot(selTp3D, title = "3DT", color = tappedColor, display = display.price_scale)
 plot(selTp5D, title = "5DT", color = tappedColor, display = display.price_scale)
