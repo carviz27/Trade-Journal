@@ -35,7 +35,9 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //   - Saída: Stop Loss (para lá da zona) e Take Profit %.
 //
 // Só funciona em BTC (BTCUSDT, BTCUSD, BTCUSDT.P, XBTUSD, ...).
-// O cálculo dos POCs é o mesmo do indicador original.
+// O cálculo dos POCs é o mesmo do indicador original, mas corre sempre sobre
+// velas de 1h num contexto próprio (request.security), por isso os POCs são
+// iguais e completos em qualquer timeframe do gráfico (1m, 5m, ..., 1D).
 // ============================================================================
 
 grpStrat  = "Strategy"
@@ -202,24 +204,6 @@ if cVolType == "N/A"
 if realVolumeOnly and cVolType == "tick"
     runtime.error("Símbolo " + targetSymbol + " só fornece tick volume. Desliga 'Real volume only' ou muda a exchange.")
 
-useLowerTF  = timeframe.in_seconds(calcTF) < timeframe.in_seconds(timeframe.period)
-useIntrabar = timeframe.in_seconds("60") < timeframe.in_seconds(timeframe.period)
-
-[chH, chL, chV, chC] = request.security(targetSymbol, timeframe.period,
-     [high, low, volume, close], lookahead = barmerge.lookahead_off)
-
-ibH = array.new<float>()
-ibL = array.new<float>()
-ibV = array.new<float>()
-ibT = array.new<int>()
-ibC = array.new<float>()
-if useIntrabar
-    ibH := request.security_lower_tf(targetSymbol, "60", high)
-    ibL := request.security_lower_tf(targetSymbol, "60", low)
-    ibV := request.security_lower_tf(targetSymbol, "60", volume)
-    ibT := request.security_lower_tf(targetSymbol, "60", time)
-    ibC := request.security_lower_tf(targetSymbol, "60", close)
-
 // ---------------------------------------------------------------------------
 // Estado por timeframe
 // ---------------------------------------------------------------------------
@@ -235,9 +219,6 @@ type TFState
     array<float> nakedPrices
     array<float> tappedPrices
     array<int> tappedTaps
-    line lineNew = na
-    array<line> nakedLines
-    line lineTapped = na
     array<float> tradeSel
 
 computePOC(array<float> hArr, array<float> lArr, array<float> vArr, int fromIdx, int toIdx, int rows) =>
@@ -360,7 +341,7 @@ newTF(string name, bool showNew, bool showNaked, bool showTapped, int maxVisible
     TFState.new(tfName = name, showNew = showNew, showNaked = showNaked, showTapped = showTapped,
          maxVisible = maxVisible, hasTapped = hasTapped,
          nakedPrices = array.new<float>(), tappedPrices = array.new<float>(), tappedTaps = array.new<int>(),
-         nakedLines = array.new<line>(), tradeSel = array.new<float>())
+         tradeSel = array.new<float>())
 
 var TFState st1D = newTF("1D", newShow1D, nakedShow1D, tappedShow1D, 3, true)
 var TFState st2D = newTF("2D", newShow2D, nakedShow2D, tappedShow2D, 3, true)
@@ -388,200 +369,183 @@ var float selTp2W = na
 var float selTp1M = na
 
 // ---------------------------------------------------------------------------
-// Blocos de cálculo e deteção de fecho de período (igual ao indicador)
+// Motor dos POCs - corre num contexto PRÓPRIO de velas de 1 hora
+// (request.security(targetSymbol, "60", ...)), e não nas velas do gráfico.
+// Assim o histórico disponível para construir os volume profiles é o das
+// velas de 1h (meses/anos), e os POCs são os mesmos em QUALQUER timeframe do
+// gráfico (1m, 5m, 15m, 1h, 4h...). Antes, em 1m/5m o gráfico só tinha uns
+// dias/semanas de velas e os POCs de semanas/meses quase não existiam.
 // ---------------------------------------------------------------------------
-var array<float> barH = array.new<float>()
-var array<float> barL = array.new<float>()
-var array<float> barV = array.new<float>()
-var array<int>   dayStart  = array.new<int>()
-var array<int>   dayCloseT = array.new<int>()
-var array<int>   monthBoundary = array.new<int>()
-var array<int>   weekBoundary = array.new<int>()
-var float lastDailyClose = na
-
-var array<float> todayH = array.new<float>()
-var array<float> todayL = array.new<float>()
-var array<float> todayV = array.new<float>()
-var int ibConsumed = 0
-var int ibLastBarIdx = -1
-
-var float hourH = na
-var float hourL = na
-var float hourV = 0.0
-
-var float dHi = na
-var float dLo = na
-var int dT = na
-var float dC = na
-var bool hadNewDay = false
-
 nakedLive  = nakedUpdateTick and not waitForClose
 tappedLive = tappedUpdateTick and not waitForClose
 
-closeDay(float dHi_, float dLo_, int dT_, float dC_, float prevClose_) =>
-    n = array.size(dayStart)
+type PocEngine
+    array<float> barH
+    array<float> barL
+    array<float> barV
+    array<int>   dayStart
+    array<int>   dayCloseT
+    array<int>   monthBoundary
+    array<int>   weekBoundary
+    array<float> todayH
+    array<float> todayL
+    array<float> todayV
+    float lastDailyClose = na
+    int   dayCount = 0
+    float dayClose = na
+    array<TFState> tfs
+
+// Resultado enviado do contexto de 1h para o gráfico (só os níveis mais
+// próximos do preço, para não copiar arrays enormes em cada vela).
+type TFOut
+    float newPrice = na
+    bool  hasNew = false
+    array<float> naked
+    array<float> tapped
+
+type PocOut
+    array<TFOut> tfs
+    int   dayCount = 0
+    float dayClose = na
+
+POC_OUT_N = 25
+
+closeDayE(PocEngine e, float dHi_, float dLo_, int dT_, float dC_, float prevClose_) =>
+    n = array.size(e.dayStart)
     if n > 0
-        prevT = array.get(dayCloseT, n - 1)
+        prevT = array.get(e.dayCloseT, n - 1)
         newMonth = month(prevT) != month(dT_) or year(prevT) != year(dT_)
         if newMonth
-            mStart = array.size(monthBoundary) > 0 ? array.get(monthBoundary, array.size(monthBoundary) - 1) : 0
-            hStart = array.get(dayStart, mStart)
-            [pocM, okM] = computePOC(barH, barL, barV, hStart, array.size(barH) - 1, rowSize)
+            mStart = array.size(e.monthBoundary) > 0 ? array.get(e.monthBoundary, array.size(e.monthBoundary) - 1) : 0
+            hStart = array.get(e.dayStart, mStart)
+            [pocM, okM] = computePOC(e.barH, e.barL, e.barV, hStart, array.size(e.barH) - 1, rowSize)
             if okM and prevT >= startTime
-                onPeriodClose(st1M, pocM)
-            array.push(monthBoundary, n)
+                onPeriodClose(array.get(e.tfs, 6), pocM)
+            array.push(e.monthBoundary, n)
 
         newWeek = dayofweek(dT_) == dayofweek.monday and dayofweek(prevT) != dayofweek.monday
         if newWeek
-            wStart = array.size(weekBoundary) > 0 ? array.get(weekBoundary, array.size(weekBoundary) - 1) : 0
-            hwStart = array.get(dayStart, wStart)
-            [pocW, okW] = computePOC(barH, barL, barV, hwStart, array.size(barH) - 1, rowSize)
+            wStart = array.size(e.weekBoundary) > 0 ? array.get(e.weekBoundary, array.size(e.weekBoundary) - 1) : 0
+            hwStart = array.get(e.dayStart, wStart)
+            [pocW, okW] = computePOC(e.barH, e.barL, e.barV, hwStart, array.size(e.barH) - 1, rowSize)
             if okW and prevT >= startTime
-                onPeriodClose(st1W, pocW)
-            array.push(weekBoundary, n)
-            wCount = array.size(weekBoundary)
+                onPeriodClose(array.get(e.tfs, 4), pocW)
+            array.push(e.weekBoundary, n)
+            wCount = array.size(e.weekBoundary)
             if weekParity(prevT) == 1 and wCount >= 2
-                w2Start = array.get(weekBoundary, wCount - 2)
-                hw2Start = array.get(dayStart, w2Start)
-                [pocW2, okW2] = computePOC(barH, barL, barV, hw2Start, array.size(barH) - 1, rowSize)
+                w2Start = array.get(e.weekBoundary, wCount - 2)
+                hw2Start = array.get(e.dayStart, w2Start)
+                [pocW2, okW2] = computePOC(e.barH, e.barL, e.barV, hw2Start, array.size(e.barH) - 1, rowSize)
                 if okW2 and prevT >= startTime
-                    onPeriodClose(st2W, pocW2)
+                    onPeriodClose(array.get(e.tfs, 5), pocW2)
 
-    todayStartIdx = array.size(barH)
-    if array.size(todayH) > 0
-        hi2 = 0
-        while hi2 < array.size(todayH)
-            array.push(barH, array.get(todayH, hi2))
-            array.push(barL, array.get(todayL, hi2))
-            array.push(barV, array.get(todayV, hi2))
-            hi2 += 1
-    else
-        array.push(barH, dHi_)
-        array.push(barL, dLo_)
-        array.push(barV, chV[1])
-    array.push(dayStart, todayStartIdx)
-    array.push(dayCloseT, dT_)
-    n2 = array.size(dayStart)
-    lastHourIdx = array.size(barH) - 1
+    todayStartIdx = array.size(e.barH)
+    hi2 = 0
+    while hi2 < array.size(e.todayH)
+        array.push(e.barH, array.get(e.todayH, hi2))
+        array.push(e.barL, array.get(e.todayL, hi2))
+        array.push(e.barV, array.get(e.todayV, hi2))
+        hi2 += 1
+    array.push(e.dayStart, todayStartIdx)
+    array.push(e.dayCloseT, dT_)
+    n2 = array.size(e.dayStart)
+    lastHourIdx = array.size(e.barH) - 1
     dowIdx = (dayofweek(dT_) - dayofweek.monday + 7) % 7
 
     if dT_ >= startTime
-        [poc1, ok1] = computePOC(barH, barL, barV, todayStartIdx, lastHourIdx, rowSize)
+        [poc1, ok1] = computePOC(e.barH, e.barL, e.barV, todayStartIdx, lastHourIdx, rowSize)
         if ok1
-            onPeriodClose(st1D, poc1)
+            onPeriodClose(array.get(e.tfs, 0), poc1)
     if dowIdx % 2 == 1 and n2 >= 2 and dT_ >= startTime
-        h2 = array.get(dayStart, n2 - 2)
-        [poc2, ok2] = computePOC(barH, barL, barV, h2, lastHourIdx, rowSize)
+        h2 = array.get(e.dayStart, n2 - 2)
+        [poc2, ok2] = computePOC(e.barH, e.barL, e.barV, h2, lastHourIdx, rowSize)
         if ok2
-            onPeriodClose(st2D, poc2)
+            onPeriodClose(array.get(e.tfs, 1), poc2)
     if dowIdx % 3 == 2 and n2 >= 3 and dT_ >= startTime
-        h3 = array.get(dayStart, n2 - 3)
-        [poc3, ok3] = computePOC(barH, barL, barV, h3, lastHourIdx, rowSize)
+        h3 = array.get(e.dayStart, n2 - 3)
+        [poc3, ok3] = computePOC(e.barH, e.barL, e.barV, h3, lastHourIdx, rowSize)
         if ok3
-            onPeriodClose(st3D, poc3)
+            onPeriodClose(array.get(e.tfs, 2), poc3)
     if dowIdx == 4 and n2 >= 5 and dT_ >= startTime
-        h5 = array.get(dayStart, n2 - 5)
-        [poc5, ok5] = computePOC(barH, barL, barV, h5, lastHourIdx, rowSize)
+        h5 = array.get(e.dayStart, n2 - 5)
+        [poc5, ok5] = computePOC(e.barH, e.barL, e.barV, h5, lastHourIdx, rowSize)
         if ok5
-            onPeriodClose(st5D, poc5)
+            onPeriodClose(array.get(e.tfs, 3), poc5)
 
     if not nakedLive
-        for i = 0 to array.size(allTF) - 1
-            processNakedTaps(array.get(allTF, i), dHi_, dLo_, dC_, prevClose_)
+        for i = 0 to array.size(e.tfs) - 1
+            processNakedTaps(array.get(e.tfs, i), dHi_, dLo_, dC_, prevClose_)
     if not tappedLive
-        for i = 0 to array.size(allTF) - 1
-            processTappedTaps(array.get(allTF, i), dHi_, dLo_, dC_, prevClose_)
+        for i = 0 to array.size(e.tfs) - 1
+            processTappedTaps(array.get(e.tfs, i), dHi_, dLo_, dC_, prevClose_)
 
-    array.clear(todayH)
-    array.clear(todayL)
-    array.clear(todayV)
+    array.clear(e.todayH)
+    array.clear(e.todayL)
+    array.clear(e.todayV)
 
-hadNewDay := false
 
-// -------- Caminho A: gráfico <= calcTF --------
-isNewCalcBar = not useLowerTF and timeframe.change(calcTF) and not na(chH[1])
+// Um passo do motor = uma vela de 1h do símbolo de dados.
+pocEngineStep() =>
+    var PocEngine e = PocEngine.new(barH = array.new<float>(), barL = array.new<float>(), barV = array.new<float>(),
+         dayStart = array.new<int>(), dayCloseT = array.new<int>(), monthBoundary = array.new<int>(),
+         weekBoundary = array.new<int>(), todayH = array.new<float>(), todayL = array.new<float>(),
+         todayV = array.new<float>(),
+         tfs = array.from(
+             newTF("1D", newShow1D, nakedShow1D, tappedShow1D, 3, true),
+             newTF("2D", newShow2D, nakedShow2D, tappedShow2D, 3, true),
+             newTF("3D", newShow3D, nakedShow3D, tappedShow3D, 3, true),
+             newTF("5D", newShow5D, nakedShow5D, tappedShow5D, 3, true),
+             newTF("1W", newShow1W, nakedShow1W, tappedShow1W, 2, true),
+             newTF("2W", newShow2W, nakedShow2W, tappedShow2W, 2, true),
+             newTF("1M", newShow1M, nakedShow1M, tappedShow1M, 2, true)))
+    pT = time[1]
+    pC = close[1]
+    // Primeira vela de 1h de um novo dia (calcTF) -> fecha o dia anterior.
+    if timeframe.change(calcTF) and array.size(e.todayH) > 0
+        dLo = array.min(e.todayL)
+        dHi = array.max(e.todayH)
+        closeDayE(e, dHi, dLo, pT, pC, e.lastDailyClose)
+        e.lastDailyClose := pC
+        e.dayCount += 1
+        e.dayClose := pC
+    array.push(e.todayH, high)
+    array.push(e.todayL, low)
+    array.push(e.todayV, volume)
+    // "Update on every tick": toques verificados vela de 1h a vela de 1h.
+    if nakedLive
+        for st in e.tfs
+            processNakedTaps(st, high, low, close, pC)
+    if tappedLive
+        for st in e.tfs
+            processTappedTaps(st, high, low, close, pC)
+    PocOut out = PocOut.new(tfs = array.new<TFOut>(), dayCount = e.dayCount, dayClose = e.dayClose)
+    for st in e.tfs
+        array.push(out.tfs, TFOut.new(st.newPrice, st.hasNew,
+             selectClosest(st.nakedPrices, POC_OUT_N, close), selectClosest(st.tappedPrices, POC_OUT_N, close)))
+    out
 
-if not useLowerTF and not useIntrabar and timeframe.change("60") and not na(hourH)
-    array.push(todayH, hourH)
-    array.push(todayL, hourL)
-    array.push(todayV, hourV)
-    hourH := na
-    hourL := na
-    hourV := 0.0
+PocOut pocOut = request.security(targetSymbol, "60", pocEngineStep(), lookahead = barmerge.lookahead_off)
 
-if isNewCalcBar
-    dLo := array.size(todayL) > 0 ? array.min(todayL) : chL[1]
-    dHi := array.size(todayH) > 0 ? array.max(todayH) : chH[1]
-    dT  := time[1]
-    dC  := chC[1]
-    closeDay(dHi, dLo, dT, dC, lastDailyClose)
-    lastDailyClose := dC
-    hadNewDay := true
-
-if not useLowerTF
-    if useIntrabar and array.size(ibH) > 0
-        if bar_index != ibLastBarIdx
-            ibConsumed := 0
-            ibLastBarIdx := bar_index
-        ibTotal = array.size(ibH)
-        ii = ibConsumed
-        while ii < ibTotal
-            array.push(todayH, array.get(ibH, ii))
-            array.push(todayL, array.get(ibL, ii))
-            array.push(todayV, array.get(ibV, ii))
-            ii += 1
-        ibConsumed := ibTotal
-    else
-        hourH := na(hourH) ? chH : math.max(hourH, chH)
-        hourL := na(hourL) ? chL : math.min(hourL, chL)
-        hourV += chV
-
-// -------- Caminho B: gráfico > calcTF --------
-var int consumedCount = 0
-var int lastBarIdxSeen = -1
-var int accumDayIdx = -999999
-var int accumDayT = na
-var float accumDayC = na
-if useLowerTF
-    if bar_index != lastBarIdxSeen
-        consumedCount := 0
-        lastBarIdxSeen := bar_index
-    ibTotal2 = array.size(ibH)
-    idx = consumedCount
-    while idx < ibTotal2
-        hH = array.get(ibH, idx)
-        hL = array.get(ibL, idx)
-        hV = array.get(ibV, idx)
-        hT = array.get(ibT, idx)
-        hC = array.get(ibC, idx)
-        hDayIdx = int(hT / 86400000)
-        if array.size(todayH) > 0 and hDayIdx != accumDayIdx
-            dLo := array.min(todayL)
-            dHi := array.max(todayH)
-            dT  := accumDayT
-            dC  := accumDayC
-            closeDay(dHi, dLo, dT, dC, lastDailyClose)
-            lastDailyClose := dC
-            hadNewDay := true
-        array.push(todayH, hH)
-        array.push(todayL, hL)
-        array.push(todayV, hV)
-        accumDayIdx := hDayIdx
-        accumDayT := hT
-        accumDayC := hC
-        idx += 1
-    consumedCount := ibTotal2
+// Copia o resultado para o estado do gráfico (seleção, desenho e trading).
+var int lastDayCount = -1
+var float dC = na
+bool hadNewDay = false
+if not na(pocOut)
+    for k = 0 to 6
+        o  = array.get(pocOut.tfs, k)
+        sk = array.get(allTF, k)
+        sk.newPrice := o.newPrice
+        sk.hasNew := o.hasNew
+        sk.nakedPrices := o.naked
+        sk.tappedPrices := o.tapped
+    if pocOut.dayCount != lastDayCount
+        hadNewDay := true
+        dC := na(pocOut.dayClose) ? close : pocOut.dayClose
+        lastDayCount := pocOut.dayCount
 
 // ---------------------------------------------------------------------------
-// Taps e seleção dos níveis
+// Seleção dos níveis mostrados
 // ---------------------------------------------------------------------------
-if nakedLive
-    for i = 0 to array.size(allTF) - 1
-        processNakedTaps(array.get(allTF, i), high, low, close, close[1])
-if tappedLive
-    for i = 0 to array.size(allTF) - 1
-        processTappedTaps(array.get(allTF, i), high, low, close, close[1])
-
 refreshNaked(float ref) =>
     updateNakedSel(st1D, sel1D, ref)
     updateNakedSel(st2D, sel2D, ref)
@@ -1235,29 +1199,26 @@ showLevels = lineThickness > 0
 drawLevel(color col, float price) =>
     line.new(time[1], price, time, price, xloc = xloc.bar_time, extend = extend.both, color = col, style = line.style_dotted, width = lineThickness)
 
+var array<line> drawnLines = array.new<line>()
+
 drawTF(TFState st, array<float> nakedSel, float tappedSel) =>
-    if not na(st.lineNew)
-        line.delete(st.lineNew)
-    if array.size(st.nakedLines) > 0
-        for i = 0 to array.size(st.nakedLines) - 1
-            line.delete(array.get(st.nakedLines, i))
-    array.clear(st.nakedLines)
-    if not na(st.lineTapped)
-        line.delete(st.lineTapped)
     if showLevels
         if st.showNew and st.hasNew
-            st.lineNew := drawLevel(newColor, st.newPrice)
+            array.push(drawnLines, drawLevel(newColor, st.newPrice))
         if st.showNaked
             i = 0
             while i < array.size(nakedSel)
                 p = array.get(nakedSel, i)
                 if not na(p)
-                    array.push(st.nakedLines, drawLevel(nakedColor, p))
+                    array.push(drawnLines, drawLevel(nakedColor, p))
                 i += 1
         if st.showTapped and st.hasTapped and not na(tappedSel)
-            st.lineTapped := drawLevel(tappedColor, tappedSel)
+            array.push(drawnLines, drawLevel(tappedColor, tappedSel))
 
 if barstate.islast
+    for ln in drawnLines
+        line.delete(ln)
+    array.clear(drawnLines)
     drawTF(st1D, sel1D, selTp1D)
     drawTF(st2D, sel2D, selTp2D)
     drawTF(st3D, sel3D, selTp3D)
