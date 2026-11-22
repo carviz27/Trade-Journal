@@ -1,0 +1,1310 @@
+//@version=6
+strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, max_lines_count = 500, max_boxes_count = 200,
+     initial_capital = 10000, currency = currency.USD,
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 5,
+     pyramiding = 1, commission_type = strategy.commission.percent, commission_value = 0.05,
+     slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
+
+// ============================================================================
+// Estratégia baseada no indicador "POC Multi-Timeframe (1D-1M)".
+//
+// Regra:
+//   - POCs próximos agrupam-se em ZONAS (ver secção "POC zones").
+//   - Zona ABAIXO do preço atual -> ordem LIMIT de COMPRA (long).
+//   - Zona ACIMA  do preço atual -> ordem LIMIT de VENDA  (short).
+//   - Preço dentro de uma zona -> essa zona não gera ordens.
+//   - Todos os POCs são iguais (New/Naked/Tapped não interessa). Depois de
+//     negociado, um POC fica bloqueado até o preço se afastar 'Re-arm
+//     distance %' e depois pode voltar a ser usado (mesmo no próprio dia).
+//   - Só UMA trade de cada vez: enquanto houver uma posição aberta não são
+//     colocadas novas ordens; a próxima só é aberta depois de a atual sair
+//     por Take Profit ou Stop Loss. Todas as ordens pendentes estão no mesmo
+//     grupo OCA: quando uma é executada, as outras são canceladas logo (mesmo
+//     dentro da mesma vela). Não há inversões de posição.
+//   - Filtro RSI (ligado por defeito; um ou vários timeframes 1/5/15/30 min,
+//     combinados com Any/All): só entra quando o preço toca a zona e o
+//     RSI(14) está < 30 (long) ou > 70 (short), dentro de uma janela de N
+//     minutos após o toque.
+//   - Filtro de liquidações (ligado por defeito): só entra se as liquidações
+//     de LONGS (para longs) / SHORTS (para shorts) numa vela de 5m (ou do
+//     timeframe escolhido) - a atual ou uma das 3 anteriores - forem >= 20M USD. Dados = indicador Liquidations do
+//     TradingView (tickers <CONTRATO>_LQSELL = longs / _LQBUY = shorts, campo volume), da
+//     exchange do gráfico ou agregados. Nesse modo a
+//     entrada é a mercado na barra seguinte do gráfico (no gráfico de 1m =
+//     minuto seguinte; em 15m pode chegar até 15 min de atraso).
+//   - Saída: Stop Loss (para lá da zona) e Take Profit %.
+//
+// Só funciona em BTC (BTCUSDT, BTCUSD, BTCUSDT.P, XBTUSD, ...).
+// O cálculo dos POCs é o mesmo do indicador original.
+// ============================================================================
+
+grpStrat  = "Strategy"
+grpData   = "Data source"
+grpNew    = "Timeframes - New"
+grpNaked  = "Timeframes - Naked"
+grpTapped = "Timeframes - Tapped"
+grpLevels = "Levels"
+grpCalc   = "Calculation"
+
+// ---------------------------------------------------------------------------
+// Inputs da estratégia
+// ---------------------------------------------------------------------------
+tradeDir = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = grpStrat,
+     tooltip = "Both: long nos POCs abaixo do preço e short nos POCs acima. Long only / Short only: só coloca as ordens desse lado.")
+nTradeLevels = input.int(3, "POCs per timeframe", minval = 1, maxval = 20, group = grpStrat,
+     tooltip = "Quantos POCs de cada timeframe (os mais próximos do preço) entram na estratégia. Todos os POCs são tratados por igual. Só são negociados os POCs que estão LIGADOS nos grupos 'Timeframes - New / Naked / Tapped': o que desligares deixa de aparecer E deixa de ser negociado.")
+grpZone = "POC zones (clusters)"
+clusterPct = input.float(0.4, "Cluster distance %", minval = 0.0, step = 0.05, group = grpZone,
+     tooltip = "POCs a menos desta distância (%) do POC vizinho juntam-se na mesma zona. 0 = cada POC é uma zona sozinho (comportamento antigo).")
+maxZonePct = input.float(1.5, "Max zone width %", minval = 0.0, step = 0.1, group = grpZone,
+     tooltip = "Largura máxima de uma zona, para os POCs não se encadearem numa zona gigante.")
+minPocsZone = input.int(1, "Min POCs per zone", minval = 1, maxval = 20, group = grpZone,
+     tooltip = "1 = negoceia também POCs isolados. 2+ = só negoceia zonas de confluência com pelo menos N POCs.")
+entryMode = input.string("Near edge", "Entry at", options = ["Near edge", "Zone middle"], group = grpZone,
+     tooltip = "Near edge: entra no primeiro POC da zona que o preço toca. Zone middle: entra no meio da zona.")
+sizeByCount = input.bool(false, "Scale size by POC count", group = grpZone,
+     tooltip = "Tamanho = base % x nº de POCs da zona (até ao multiplicador máximo).")
+maxSizeMult = input.int(3, "Max size multiplier", minval = 1, maxval = 10, group = grpZone)
+basePct = input.float(5.0, "Base size (% equity)", minval = 0.1, step = 0.5, group = grpZone)
+showZones = input.bool(true, "Show zones", group = grpZone)
+grpRsi = "RSI filter"
+useRsi = input.bool(true, "Require RSI", group = grpRsi,
+     tooltip = "ON: só entra quando o preço toca a zona E o RSI (dos timeframes ligados) está oversold (long) ou overbought (short). A entrada é a mercado, na abertura da barra seguinte do gráfico - quanto menor o gráfico, mais precisa. OFF: ordens limit nas zonas, sem filtro.")
+rsi1On  = input.bool(true,  "1m",  group = grpRsi, inline = "rsiTF")
+rsi5On  = input.bool(false, "5m",  group = grpRsi, inline = "rsiTF")
+rsi15On = input.bool(false, "15m", group = grpRsi, inline = "rsiTF")
+rsi30On = input.bool(false, "30m", group = grpRsi, inline = "rsiTF",
+     tooltip = "Timeframes do RSI a usar (podes ligar vários). O RSI de cada um é avaliado minuto a minuto, em formação (o valor que verias ao vivo nesse timeframe).")
+rsiCombine = input.string("Any", "Combine timeframes", options = ["Any", "All"], group = grpRsi,
+     tooltip = "Any: basta UM dos timeframes ligados estar oversold/overbought. All: TODOS os ligados têm de estar ao mesmo tempo.")
+rsiLen = input.int(14, "RSI length", minval = 2, group = grpRsi)
+rsiOB  = input.float(70, "Overbought (shorts acima de)", group = grpRsi)
+rsiOS  = input.float(30, "Oversold (longs abaixo de)", group = grpRsi)
+rsiWindow = input.int(3, "Minutes after touch to wait for RSI", minval = 0, maxval = 120, group = grpRsi,
+     tooltip = "Depois de o preço tocar a zona, durante quantos minutos o sinal fica à espera de o RSI chegar ao extremo. 0 = o RSI tem de estar no extremo no próprio minuto do toque. O sinal é cancelado se o preço chegar ao stop loss da zona.")
+
+grpLiq = "Liquidations filter"
+useLiq = input.bool(true, "Require liquidations", group = grpLiq,
+     tooltip = "ON: só entra se as liquidações dos últimos X minutos forem >= ao mínimo - LONG liquidations para longs, SHORT liquidations para shorts. Combina com o filtro RSI (os dois têm de confirmar no mesmo minuto).")
+liqSource = input.string("Aggregated (all exchanges)", "Liquidations source", options = ["Chart exchange", "Aggregated (all exchanges)", "Custom"], group = grpLiq,
+     tooltip = "Chart exchange: liquidações da exchange/contrato do gráfico (ex.: BYBIT:BTCUSDT.P -> BYBIT:BTCUSDT.P_LQSELL / _LQBUY). Aggregated: todas as exchanges suportadas (CRYPTO:BTC_LQSELL / _LQBUY), igual ao indicador 'Liquidations' do TradingView em modo agregado. Custom: escreves os símbolos abaixo. Os dados são os mesmos do indicador Liquidations do TradingView. O gráfico tem de ser um contrato perpétuo/futuro (.P), não spot, para 'Chart exchange'.")
+liqLongSym  = input.symbol("", "Custom long liquidations symbol", group = grpLiq, active = liqSource == "Custom",
+     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQSELL (longs liquidados = venda forçada).")
+liqShortSym = input.symbol("", "Custom short liquidations symbol", group = grpLiq, active = liqSource == "Custom",
+     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQBUY (shorts liquidados = compra forçada).")
+liqUnits = input.string("Auto", "Values are in", options = ["Auto", "USD", "BTC"], group = grpLiq,
+     tooltip = "Consoante a exchange, o TradingView dá as liquidações em BTC ou em USD/USDT. Auto: deteta pelo tipo de volume do símbolo de liquidações e converte para USD (BTC x preço) quando é preciso.")
+liqMin = input.float(20000000.0, "Minimum liquidations (USD)", minval = 0, step = 1000000, group = grpLiq)
+liq1On  = input.bool(false, "1m",  group = grpLiq, inline = "liqTF")
+liq5On  = input.bool(true,  "5m",  group = grpLiq, inline = "liqTF")
+liq15On = input.bool(false, "15m", group = grpLiq, inline = "liqTF")
+liq30On = input.bool(false, "30m", group = grpLiq, inline = "liqTF")
+liq60On = input.bool(false, "1h",  group = grpLiq, inline = "liqTF",
+     tooltip = "Timeframe das velas de liquidações (1m/5m/15m/30m/1h), como no indicador Liquidations nesse timeframe. Podes ligar vários.")
+liqCombine = input.string("Any", "Combine timeframes", options = ["Any", "All"], group = grpLiq,
+     tooltip = "Any: basta UM dos timeframes ligados cumprir. All: TODOS têm de cumprir.")
+liqLookback = input.int(3, "Bars back", minval = 0, maxval = 20, group = grpLiq,
+     tooltip = "A trade abre se a vela de liquidações ATUAL ou uma das N velas anteriores (do timeframe escolhido, ex.: 5m) tiver liquidações >= ao mínimo. Cada vela é contada sozinha (não se somam velas). 0 = só a vela atual.")
+
+reuseTouched = input.bool(true, "Re-use touched POCs", group = grpStrat,
+     tooltip = "ON: um POC/zona já negociado volta a poder ser usado (mesmo no próprio dia) depois de o preço se afastar dele pelo menos 'Re-arm distance %'. OFF: cada POC só é negociado uma vez.")
+rearmPct = input.float(0.5, "Re-arm distance %", minval = 0.0, step = 0.05, group = grpStrat,
+     tooltip = "Distância a que o preço tem de se afastar de um POC já negociado para ele voltar a receber ordem. Evita entrar várias vezes seguidas no mesmo toque.")
+slPct = input.float(1.0, "Stop loss % (beyond far edge of zone)", minval = 0.0, step = 0.1, group = grpStrat,
+     tooltip = "O stop fica esta % para lá da extremidade OPOSTA da zona. 0 = sem stop loss.")
+tpPct = input.float(4.0, "Take profit %", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "0 = sem take profit (sai só por stop ou inversão).")
+showDiag = input.bool(true, "Diagnostic table", group = grpStrat,
+     tooltip = "Mostra no canto inferior direito o estado dos filtros na última vela: zonas armadas, sinais à espera, RSI e a maior vela de liquidações (longs/shorts) - para perceber porque é que uma trade não abriu.")
+tradeFrom = input.time(timestamp("2023-09-01T01:00:00"), "Trade from", group = grpStrat)
+tradeTo   = input.time(timestamp("2099-01-01T00:00:00"), "Trade until", group = grpStrat)
+
+// ---------------------------------------------------------------------------
+// Inputs do indicador original
+// ---------------------------------------------------------------------------
+realVolumeOnly = input.bool(true, "Real volume only", group = grpData,
+     tooltip = "Se o símbolo resolvido só tiver volume sintético (tick volume), para com erro.")
+
+cryptoOpt = input.string("(chart's exchange:quote)", "Crypto / Exchange:Quote", group = grpData,
+     options = ["(chart's exchange:quote)", "BINANCE:USDT", "BINANCE:USDT.P", "BINANCE:USD",
+     "BYBIT:USDT", "BYBIT:USDT.P", "BYBIT:USD", "COINBASE:USD", "COINBASE:USDT",
+     "BITFINEX:USD", "BITSTAMP:USD", "OKX:USDT", "OKX:USDT.P", "KRAKEN:USD",
+     "GATEIO:USDT", "MEXC:USDT", "Custom"],
+     tooltip = "Fonte do volume para calcular os POCs. As ordens são sempre executadas no símbolo do gráfico.")
+cryptoCustom = input.string("", "Crypto / Custom ticker (ex.: BYBIT:BTCUSDT.P)", group = grpData)
+
+startTime = input.time(timestamp("2023-09-01T01:00:00"), "Start date", group = grpData,
+     tooltip = "Os níveis só são calculados a partir desta data.")
+rowSize = input.int(24, "Row size", minval = 2, maxval = 200, group = grpData)
+
+newColor   = input.color(color.new(color.gray, 0), "New - color", group = grpNew, inline = "new0")
+newShow1D  = input.bool(true, "1D", group = grpNew, inline = "new1")
+newShow2D  = input.bool(true, "2D", group = grpNew, inline = "new1")
+newShow3D  = input.bool(true, "3D", group = grpNew, inline = "new1")
+newShow5D  = input.bool(true, "5D", group = grpNew, inline = "new1")
+newShow1W  = input.bool(true, "1W", group = grpNew, inline = "new2")
+newShow2W  = input.bool(true, "2W", group = grpNew, inline = "new2")
+newShow1M  = input.bool(true, "1M", group = grpNew, inline = "new2")
+
+nakedColor  = input.color(color.new(#7f6fa2, 0), "Naked - color", group = grpNaked, inline = "nk0")
+nakedShow1D = input.bool(true, "1D", group = grpNaked, inline = "nk1")
+nakedShow2D = input.bool(true, "2D", group = grpNaked, inline = "nk1")
+nakedShow3D = input.bool(true, "3D", group = grpNaked, inline = "nk1")
+nakedShow5D = input.bool(true, "5D", group = grpNaked, inline = "nk1")
+nakedShow1W = input.bool(true, "1W", group = grpNaked, inline = "nk2")
+nakedShow2W = input.bool(true, "2W", group = grpNaked, inline = "nk2")
+nakedShow1M = input.bool(true, "1M", group = grpNaked, inline = "nk2")
+nakedUpdateTick = input.bool(false, "Update on every tick", group = grpNaked)
+
+tappedColor  = input.color(color.new(#9c87be, 0), "Tapped - color", group = grpTapped, inline = "tp0")
+tappedShow1D = input.bool(true, "1D", group = grpTapped, inline = "tp1")
+tappedShow2D = input.bool(true, "2D", group = grpTapped, inline = "tp1")
+tappedShow3D = input.bool(true, "3D", group = grpTapped, inline = "tp1")
+tappedShow5D = input.bool(true, "5D", group = grpTapped, inline = "tp1")
+tappedShow1W = input.bool(true, "1W", group = grpTapped, inline = "tp2")
+tappedShow2W = input.bool(true, "2W", group = grpTapped, inline = "tp2")
+tappedShow1M = input.bool(true, "1M", group = grpTapped, inline = "tp2")
+tappedUpdateTick = input.bool(false, "Update on every tick", group = grpTapped)
+countTapsBy = input.string("Whole candle", "Count taps by", options = ["Whole candle", "Candle close through"], group = grpTapped)
+tapsToRemove = input.int(2, "Taps to remove", minval = 1, maxval = 20, group = grpTapped)
+
+lineThickness = input.int(1, "Line thickness", minval = 0, maxval = 4, group = grpLevels)
+
+calcTF = input.timeframe("1D", "Timeframe", group = grpCalc)
+waitForClose = input.bool(false, "Wait for timeframe closes", group = grpCalc)
+
+// ---------------------------------------------------------------------------
+// Só BTC
+// ---------------------------------------------------------------------------
+isBTC = syminfo.basecurrency == "BTC" or syminfo.basecurrency == "XBT"
+if slPct == 0 and tpPct == 0
+    runtime.error("Define pelo menos Stop loss % ou Take profit %: só se abre uma nova trade depois de a atual sair por TP ou SL.")
+if not isBTC
+    runtime.error("Esta estratégia só funciona em BTC. Símbolo atual: " + syminfo.tickerid)
+
+// ---------------------------------------------------------------------------
+// Resolução do símbolo de dados + validação de volume real
+// ---------------------------------------------------------------------------
+resolveCrypto() =>
+    string t = syminfo.tickerid
+    if cryptoOpt == "Custom" and str.length(cryptoCustom) > 0
+        t := cryptoCustom
+    else if cryptoOpt != "(chart's exchange:quote)" and cryptoOpt != "Custom"
+        parts = str.split(cryptoOpt, ":")
+        if array.size(parts) == 2
+            t := array.get(parts, 0) + ":" + syminfo.basecurrency + array.get(parts, 1)
+    t
+
+targetSymbol = resolveCrypto()
+
+cVolType = request.security(targetSymbol, calcTF, syminfo.volumetype)
+if cVolType == "N/A"
+    runtime.error("Símbolo " + targetSymbol + " não tem dados de volume.")
+if realVolumeOnly and cVolType == "tick"
+    runtime.error("Símbolo " + targetSymbol + " só fornece tick volume. Desliga 'Real volume only' ou muda a exchange.")
+
+useLowerTF  = timeframe.in_seconds(calcTF) < timeframe.in_seconds(timeframe.period)
+useIntrabar = timeframe.in_seconds("60") < timeframe.in_seconds(timeframe.period)
+
+[chH, chL, chV, chC] = request.security(targetSymbol, timeframe.period,
+     [high, low, volume, close], lookahead = barmerge.lookahead_off)
+
+ibH = array.new<float>()
+ibL = array.new<float>()
+ibV = array.new<float>()
+ibT = array.new<int>()
+ibC = array.new<float>()
+if useIntrabar
+    ibH := request.security_lower_tf(targetSymbol, "60", high)
+    ibL := request.security_lower_tf(targetSymbol, "60", low)
+    ibV := request.security_lower_tf(targetSymbol, "60", volume)
+    ibT := request.security_lower_tf(targetSymbol, "60", time)
+    ibC := request.security_lower_tf(targetSymbol, "60", close)
+
+// ---------------------------------------------------------------------------
+// Estado por timeframe
+// ---------------------------------------------------------------------------
+type TFState
+    string tfName
+    bool showNew
+    bool showNaked
+    bool showTapped
+    int maxVisible
+    bool hasTapped
+    float newPrice = na
+    bool hasNew = false
+    array<float> nakedPrices
+    array<float> tappedPrices
+    array<int> tappedTaps
+    line lineNew = na
+    array<line> nakedLines
+    line lineTapped = na
+    array<float> tradeSel
+
+computePOC(array<float> hArr, array<float> lArr, array<float> vArr, int fromIdx, int toIdx, int rows) =>
+    float pHi = na
+    float pLo = na
+    for i = fromIdx to toIdx
+        hi = array.get(hArr, i)
+        lo = array.get(lArr, i)
+        pHi := na(pHi) ? hi : math.max(pHi, hi)
+        pLo := na(pLo) ? lo : math.min(pLo, lo)
+    if pHi > pLo
+        bins = array.new<float>(rows, 0.0)
+        binH = (pHi - pLo) / rows
+        for i = fromIdx to toIdx
+            hi  = array.get(hArr, i)
+            lo  = array.get(lArr, i)
+            vol = array.get(vArr, i)
+            rng = hi - lo
+            if rng <= 0
+                idx = int(math.min(rows - 1, math.max(0, math.floor((lo - pLo) / binH))))
+                array.set(bins, idx, array.get(bins, idx) + vol)
+            else
+                for j = 0 to rows - 1
+                    binLo = pLo + j * binH
+                    binHi = binLo + binH
+                    overlap = math.min(hi, binHi) - math.max(lo, binLo)
+                    if overlap > 0
+                        array.set(bins, j, array.get(bins, j) + vol * (overlap / rng))
+        bestIdx = 0
+        bestVol = array.get(bins, 0)
+        for j = 1 to rows - 1
+            v = array.get(bins, j)
+            if v > bestVol
+                bestVol := v
+                bestIdx := j
+        [pLo + (bestIdx + 0.5) * binH, true]
+    else
+        [float(na), false]
+
+weekParity(int t) =>
+    int(math.floor((t - 345600000) / 604800000.0)) % 2
+
+onPeriodClose(TFState st, float poc) =>
+    if st.hasNew
+        array.push(st.nakedPrices, st.newPrice)
+    st.newPrice := poc
+    st.hasNew := true
+
+checkTouch(float p, float hi, float lo, float cl, float prevCl) =>
+    countTapsBy == "Whole candle" ? (hi >= p and lo <= p) :
+         (not na(prevCl) and ((cl >= p and prevCl < p) or (cl <= p and prevCl > p)))
+
+processNakedTaps(TFState st, float hi, float lo, float cl, float prevCl) =>
+    i = array.size(st.nakedPrices) - 1
+    while i >= 0
+        p = array.get(st.nakedPrices, i)
+        if checkTouch(p, hi, lo, cl, prevCl)
+            array.remove(st.nakedPrices, i)
+            if st.hasTapped
+                array.push(st.tappedPrices, p)
+                array.push(st.tappedTaps, 0)
+        i -= 1
+
+processTappedTaps(TFState st, float hi, float lo, float cl, float prevCl) =>
+    if st.hasTapped
+        i = array.size(st.tappedPrices) - 1
+        while i >= 0
+            p = array.get(st.tappedPrices, i)
+            if checkTouch(p, hi, lo, cl, prevCl)
+                cnt = array.get(st.tappedTaps, i) + 1
+                if cnt >= tapsToRemove
+                    array.remove(st.tappedPrices, i)
+                    array.remove(st.tappedTaps, i)
+                else
+                    array.set(st.tappedTaps, i, cnt)
+            i -= 1
+
+selectClosest(array<float> prices, int maxN, float refPrice) =>
+    size = array.size(prices)
+    sel = array.new<float>()
+    if size > 0 and maxN > 0
+        idxArr = array.new<int>()
+        i = 0
+        while i < size
+            array.push(idxArr, i)
+            i += 1
+        lim = math.min(maxN, size)
+        k = 0
+        while k < lim
+            bestJ = k
+            bestD = math.abs(array.get(prices, array.get(idxArr, k)) - refPrice)
+            j = k + 1
+            while j < size
+                d = math.abs(array.get(prices, array.get(idxArr, j)) - refPrice)
+                if d < bestD
+                    bestD := d
+                    bestJ := j
+                j += 1
+            if bestJ != k
+                tmp = array.get(idxArr, k)
+                array.set(idxArr, k, array.get(idxArr, bestJ))
+                array.set(idxArr, bestJ, tmp)
+            array.push(sel, array.get(prices, array.get(idxArr, k)))
+            k += 1
+    sel
+
+updateNakedSel(TFState st, array<float> dest, float refPrice) =>
+    sel = st.showNaked ? selectClosest(st.nakedPrices, st.maxVisible, refPrice) : array.new<float>()
+    n = array.size(dest)
+    i = 0
+    while i < n
+        array.set(dest, i, i < array.size(sel) ? array.get(sel, i) : float(na))
+        i += 1
+
+updateTappedSel(TFState st, float refPrice) =>
+    sel = st.showTapped and st.hasTapped ? selectClosest(st.tappedPrices, 1, refPrice) : array.new<float>()
+    array.size(sel) > 0 ? array.get(sel, 0) : float(na)
+
+newTF(string name, bool showNew, bool showNaked, bool showTapped, int maxVisible, bool hasTapped) =>
+    TFState.new(tfName = name, showNew = showNew, showNaked = showNaked, showTapped = showTapped,
+         maxVisible = maxVisible, hasTapped = hasTapped,
+         nakedPrices = array.new<float>(), tappedPrices = array.new<float>(), tappedTaps = array.new<int>(),
+         nakedLines = array.new<line>(), tradeSel = array.new<float>())
+
+var TFState st1D = newTF("1D", newShow1D, nakedShow1D, tappedShow1D, 3, true)
+var TFState st2D = newTF("2D", newShow2D, nakedShow2D, tappedShow2D, 3, true)
+var TFState st3D = newTF("3D", newShow3D, nakedShow3D, tappedShow3D, 3, true)
+var TFState st5D = newTF("5D", newShow5D, nakedShow5D, tappedShow5D, 3, true)
+var TFState st1W = newTF("1W", newShow1W, nakedShow1W, tappedShow1W, 2, true)
+var TFState st2W = newTF("2W", newShow2W, nakedShow2W, tappedShow2W, 2, true)
+var TFState st1M = newTF("1M", newShow1M, nakedShow1M, tappedShow1M, 2, true)
+var array<TFState> allTF = array.from(st1D, st2D, st3D, st5D, st1W, st2W, st1M)
+
+var array<float> sel1D = array.new<float>(3, na)
+var array<float> sel2D = array.new<float>(3, na)
+var array<float> sel3D = array.new<float>(3, na)
+var array<float> sel5D = array.new<float>(3, na)
+var array<float> sel1W = array.new<float>(2, na)
+var array<float> sel2W = array.new<float>(2, na)
+var array<float> sel1M = array.new<float>(2, na)
+
+var float selTp1D = na
+var float selTp2D = na
+var float selTp3D = na
+var float selTp5D = na
+var float selTp1W = na
+var float selTp2W = na
+var float selTp1M = na
+
+// ---------------------------------------------------------------------------
+// Blocos de cálculo e deteção de fecho de período (igual ao indicador)
+// ---------------------------------------------------------------------------
+var array<float> barH = array.new<float>()
+var array<float> barL = array.new<float>()
+var array<float> barV = array.new<float>()
+var array<int>   dayStart  = array.new<int>()
+var array<int>   dayCloseT = array.new<int>()
+var array<int>   monthBoundary = array.new<int>()
+var array<int>   weekBoundary = array.new<int>()
+var float lastDailyClose = na
+
+var array<float> todayH = array.new<float>()
+var array<float> todayL = array.new<float>()
+var array<float> todayV = array.new<float>()
+var int ibConsumed = 0
+var int ibLastBarIdx = -1
+
+var float hourH = na
+var float hourL = na
+var float hourV = 0.0
+
+var float dHi = na
+var float dLo = na
+var int dT = na
+var float dC = na
+var bool hadNewDay = false
+
+nakedLive  = nakedUpdateTick and not waitForClose
+tappedLive = tappedUpdateTick and not waitForClose
+
+closeDay(float dHi_, float dLo_, int dT_, float dC_, float prevClose_) =>
+    n = array.size(dayStart)
+    if n > 0
+        prevT = array.get(dayCloseT, n - 1)
+        newMonth = month(prevT) != month(dT_) or year(prevT) != year(dT_)
+        if newMonth
+            mStart = array.size(monthBoundary) > 0 ? array.get(monthBoundary, array.size(monthBoundary) - 1) : 0
+            hStart = array.get(dayStart, mStart)
+            [pocM, okM] = computePOC(barH, barL, barV, hStart, array.size(barH) - 1, rowSize)
+            if okM and prevT >= startTime
+                onPeriodClose(st1M, pocM)
+            array.push(monthBoundary, n)
+
+        newWeek = dayofweek(dT_) == dayofweek.monday and dayofweek(prevT) != dayofweek.monday
+        if newWeek
+            wStart = array.size(weekBoundary) > 0 ? array.get(weekBoundary, array.size(weekBoundary) - 1) : 0
+            hwStart = array.get(dayStart, wStart)
+            [pocW, okW] = computePOC(barH, barL, barV, hwStart, array.size(barH) - 1, rowSize)
+            if okW and prevT >= startTime
+                onPeriodClose(st1W, pocW)
+            array.push(weekBoundary, n)
+            wCount = array.size(weekBoundary)
+            if weekParity(prevT) == 1 and wCount >= 2
+                w2Start = array.get(weekBoundary, wCount - 2)
+                hw2Start = array.get(dayStart, w2Start)
+                [pocW2, okW2] = computePOC(barH, barL, barV, hw2Start, array.size(barH) - 1, rowSize)
+                if okW2 and prevT >= startTime
+                    onPeriodClose(st2W, pocW2)
+
+    todayStartIdx = array.size(barH)
+    if array.size(todayH) > 0
+        hi2 = 0
+        while hi2 < array.size(todayH)
+            array.push(barH, array.get(todayH, hi2))
+            array.push(barL, array.get(todayL, hi2))
+            array.push(barV, array.get(todayV, hi2))
+            hi2 += 1
+    else
+        array.push(barH, dHi_)
+        array.push(barL, dLo_)
+        array.push(barV, chV[1])
+    array.push(dayStart, todayStartIdx)
+    array.push(dayCloseT, dT_)
+    n2 = array.size(dayStart)
+    lastHourIdx = array.size(barH) - 1
+    dowIdx = (dayofweek(dT_) - dayofweek.monday + 7) % 7
+
+    if dT_ >= startTime
+        [poc1, ok1] = computePOC(barH, barL, barV, todayStartIdx, lastHourIdx, rowSize)
+        if ok1
+            onPeriodClose(st1D, poc1)
+    if dowIdx % 2 == 1 and n2 >= 2 and dT_ >= startTime
+        h2 = array.get(dayStart, n2 - 2)
+        [poc2, ok2] = computePOC(barH, barL, barV, h2, lastHourIdx, rowSize)
+        if ok2
+            onPeriodClose(st2D, poc2)
+    if dowIdx % 3 == 2 and n2 >= 3 and dT_ >= startTime
+        h3 = array.get(dayStart, n2 - 3)
+        [poc3, ok3] = computePOC(barH, barL, barV, h3, lastHourIdx, rowSize)
+        if ok3
+            onPeriodClose(st3D, poc3)
+    if dowIdx == 4 and n2 >= 5 and dT_ >= startTime
+        h5 = array.get(dayStart, n2 - 5)
+        [poc5, ok5] = computePOC(barH, barL, barV, h5, lastHourIdx, rowSize)
+        if ok5
+            onPeriodClose(st5D, poc5)
+
+    if not nakedLive
+        for i = 0 to array.size(allTF) - 1
+            processNakedTaps(array.get(allTF, i), dHi_, dLo_, dC_, prevClose_)
+    if not tappedLive
+        for i = 0 to array.size(allTF) - 1
+            processTappedTaps(array.get(allTF, i), dHi_, dLo_, dC_, prevClose_)
+
+    array.clear(todayH)
+    array.clear(todayL)
+    array.clear(todayV)
+
+hadNewDay := false
+
+// -------- Caminho A: gráfico <= calcTF --------
+isNewCalcBar = not useLowerTF and timeframe.change(calcTF) and not na(chH[1])
+
+if not useLowerTF and not useIntrabar and timeframe.change("60") and not na(hourH)
+    array.push(todayH, hourH)
+    array.push(todayL, hourL)
+    array.push(todayV, hourV)
+    hourH := na
+    hourL := na
+    hourV := 0.0
+
+if isNewCalcBar
+    dLo := array.size(todayL) > 0 ? array.min(todayL) : chL[1]
+    dHi := array.size(todayH) > 0 ? array.max(todayH) : chH[1]
+    dT  := time[1]
+    dC  := chC[1]
+    closeDay(dHi, dLo, dT, dC, lastDailyClose)
+    lastDailyClose := dC
+    hadNewDay := true
+
+if not useLowerTF
+    if useIntrabar and array.size(ibH) > 0
+        if bar_index != ibLastBarIdx
+            ibConsumed := 0
+            ibLastBarIdx := bar_index
+        ibTotal = array.size(ibH)
+        ii = ibConsumed
+        while ii < ibTotal
+            array.push(todayH, array.get(ibH, ii))
+            array.push(todayL, array.get(ibL, ii))
+            array.push(todayV, array.get(ibV, ii))
+            ii += 1
+        ibConsumed := ibTotal
+    else
+        hourH := na(hourH) ? chH : math.max(hourH, chH)
+        hourL := na(hourL) ? chL : math.min(hourL, chL)
+        hourV += chV
+
+// -------- Caminho B: gráfico > calcTF --------
+var int consumedCount = 0
+var int lastBarIdxSeen = -1
+var int accumDayIdx = -999999
+var int accumDayT = na
+var float accumDayC = na
+if useLowerTF
+    if bar_index != lastBarIdxSeen
+        consumedCount := 0
+        lastBarIdxSeen := bar_index
+    ibTotal2 = array.size(ibH)
+    idx = consumedCount
+    while idx < ibTotal2
+        hH = array.get(ibH, idx)
+        hL = array.get(ibL, idx)
+        hV = array.get(ibV, idx)
+        hT = array.get(ibT, idx)
+        hC = array.get(ibC, idx)
+        hDayIdx = int(hT / 86400000)
+        if array.size(todayH) > 0 and hDayIdx != accumDayIdx
+            dLo := array.min(todayL)
+            dHi := array.max(todayH)
+            dT  := accumDayT
+            dC  := accumDayC
+            closeDay(dHi, dLo, dT, dC, lastDailyClose)
+            lastDailyClose := dC
+            hadNewDay := true
+        array.push(todayH, hH)
+        array.push(todayL, hL)
+        array.push(todayV, hV)
+        accumDayIdx := hDayIdx
+        accumDayT := hT
+        accumDayC := hC
+        idx += 1
+    consumedCount := ibTotal2
+
+// ---------------------------------------------------------------------------
+// Taps e seleção dos níveis
+// ---------------------------------------------------------------------------
+if nakedLive
+    for i = 0 to array.size(allTF) - 1
+        processNakedTaps(array.get(allTF, i), high, low, close, close[1])
+if tappedLive
+    for i = 0 to array.size(allTF) - 1
+        processTappedTaps(array.get(allTF, i), high, low, close, close[1])
+
+refreshNaked(float ref) =>
+    updateNakedSel(st1D, sel1D, ref)
+    updateNakedSel(st2D, sel2D, ref)
+    updateNakedSel(st3D, sel3D, ref)
+    updateNakedSel(st5D, sel5D, ref)
+    updateNakedSel(st1W, sel1W, ref)
+    updateNakedSel(st2W, sel2W, ref)
+    updateNakedSel(st1M, sel1M, ref)
+
+if nakedLive
+    refreshNaked(close)
+if tappedLive
+    selTp1D := updateTappedSel(st1D, close)
+    selTp2D := updateTappedSel(st2D, close)
+    selTp3D := updateTappedSel(st3D, close)
+    selTp5D := updateTappedSel(st5D, close)
+    selTp1W := updateTappedSel(st1W, close)
+    selTp2W := updateTappedSel(st2W, close)
+    selTp1M := updateTappedSel(st1M, close)
+
+if hadNewDay
+    if not nakedLive
+        refreshNaked(dC)
+    if not tappedLive
+        selTp1D := updateTappedSel(st1D, dC)
+        selTp2D := updateTappedSel(st2D, dC)
+        selTp3D := updateTappedSel(st3D, dC)
+        selTp5D := updateTappedSel(st5D, dC)
+        selTp1W := updateTappedSel(st1W, dC)
+        selTp2W := updateTappedSel(st2W, dC)
+        selTp1M := updateTappedSel(st1M, dC)
+
+// ============================================================================
+// ESTRATÉGIA: zonas de POCs (clusters) com ordens limit
+// ============================================================================
+// Os POCs candidatos (todos os tipos, de todos os timeframes ligados) são
+// ordenados por preço e agrupados em ZONAS: POCs seguidos a menos de
+// "Cluster distance %" uns dos outros ficam na mesma zona (até um máximo de
+// "Max zone width %"). Cada zona é tratada como UM só nível:
+//   - zona toda abaixo do preço -> 1 ordem long  (na extremidade de cima ou no meio)
+//   - zona toda acima  do preço -> 1 ordem short (na extremidade de baixo ou no meio)
+//   - preço DENTRO da zona      -> nenhuma ordem nova dessa zona (evita o
+//     compra/vende/compra/vende enquanto o preço anda no meio dos POCs)
+//   - stop loss fica para lá da extremidade OPOSTA da zona (+ buffer %), por
+//     isso andar dentro da zona não tira a posição.
+//   - depois de a zona ser tocada, TODOS os POCs dela ficam bloqueados até o
+//     preço se afastar 'Re-arm distance %' (ver "Re-use touched POCs").
+
+// traded: BLOQUEIO temporário de preços de POCs (chave = só o preço, seja
+// qual for o tipo ou timeframe) e de zonas já executadas. Com "Re-use touched
+// POCs" ligado, o bloqueio sai quando o preço se afasta 'Re-arm distance %'.
+var map<string, bool> traded = map.new<string, bool>()
+var array<string> lockKeys = array.new<string>()
+var array<float>  lockPx   = array.new<float>()
+// filled: IDs de ordens já executadas (permanente, para nunca cancelar o
+// SL/TP de uma entrada aberta). fillCnt: nº de vezes que cada zona foi
+// executada, para cada nova entrada na mesma zona ter um ID diferente.
+var map<string, bool> filled = map.new<string, bool>()
+var map<string, int>  fillCnt = map.new<string, int>()
+var bool needSel = true
+var array<string> pendIds  = array.new<string>()
+var array<string> pendBase = array.new<string>()
+var array<float>  pendPx   = array.new<float>()
+var array<string> pendMem  = array.new<string>()
+var array<bool>   pendLong = array.new<bool>()
+var array<float>  pendSL   = array.new<float>()
+var array<int>    pendCnt  = array.new<int>()
+// Sinais à espera do RSI (zona tocada, RSI ainda não no extremo).
+var array<string> trgBase  = array.new<string>()
+var array<bool>   trgLong  = array.new<bool>()
+var array<float>  trgEntry = array.new<float>()
+var array<float>  trgSL    = array.new<float>()
+var array<string> trgMem   = array.new<string>()
+var array<int>    trgCnt   = array.new<int>()
+var array<int>    trgExp   = array.new<int>()
+
+// Filtro RSI multi-timeframe. Os passos de avaliação são velas de 1 minuto
+// (as da barra do gráfico via request.security_lower_tf, ou a própria barra
+// se o gráfico for de 1m ou menos). Para cada timeframe ligado (1/5/15/30m)
+// mantém-se um RSI próprio, calculado à mão a partir desses closes de 1m:
+// RMA (Wilder, igual ao ta.rsi) dos ganhos/perdas até à última vela FECHADA
+// desse timeframe + a variação até ao minuto atual = RSI em formação, o mesmo
+// que se veria ao vivo nesse timeframe.
+chartSec = timeframe.in_seconds(timeframe.period)
+if useRsi and not (rsi1On or rsi5On or rsi15On or rsi30On)
+    runtime.error("Liga pelo menos um timeframe do RSI (1m/5m/15m/30m) ou desliga 'Require RSI'.")
+
+rsMins = array.from(1, 5, 15, 30)
+rsOn   = array.from(rsi1On, rsi5On, rsi15On, rsi30On)
+var array<float> rsPrev = array.new<float>(4, na)
+var array<float> rsLast = array.new<float>(4, na)
+var array<float> rsAvgG = array.new<float>(4, na)
+var array<float> rsAvgL = array.new<float>(4, na)
+var array<float> rsSumG = array.new<float>(4, 0.0)
+var array<float> rsSumL = array.new<float>(4, 0.0)
+var array<int>   rsN    = array.new<int>(4, 0)
+var array<int>   rsCur  = array.new<int>(4, -1)
+curRsi = array.new<float>(4, na)
+
+// Alimenta os RSIs com um close de 1m (t = hora de abertura desse minuto).
+rsiFeed(int t, float c) =>
+    for i = 0 to 3
+        if array.get(rsOn, i)
+            bid = int(math.floor(t / (array.get(rsMins, i) * 60000.0)))
+            cur = array.get(rsCur, i)
+            if cur != bid
+                if cur != -1
+                    lastC = array.get(rsLast, i)
+                    prev  = array.get(rsPrev, i)
+                    if not na(prev)
+                        ch = lastC - prev
+                        g = math.max(ch, 0)
+                        l = math.max(-ch, 0)
+                        n = array.get(rsN, i)
+                        if n < rsiLen
+                            array.set(rsSumG, i, array.get(rsSumG, i) + g)
+                            array.set(rsSumL, i, array.get(rsSumL, i) + l)
+                            array.set(rsN, i, n + 1)
+                            if n + 1 == rsiLen
+                                array.set(rsAvgG, i, array.get(rsSumG, i) / rsiLen)
+                                array.set(rsAvgL, i, array.get(rsSumL, i) / rsiLen)
+                        else
+                            array.set(rsAvgG, i, (array.get(rsAvgG, i) * (rsiLen - 1) + g) / rsiLen)
+                            array.set(rsAvgL, i, (array.get(rsAvgL, i) * (rsiLen - 1) + l) / rsiLen)
+                    array.set(rsPrev, i, lastC)
+                array.set(rsCur, i, bid)
+            array.set(rsLast, i, c)
+            prev2 = array.get(rsPrev, i)
+            aG = array.get(rsAvgG, i)
+            float r = na
+            if not na(prev2) and not na(aG)
+                chNow = c - prev2
+                dG = (aG * (rsiLen - 1) + math.max(chNow, 0)) / rsiLen
+                dL = (array.get(rsAvgL, i) * (rsiLen - 1) + math.max(-chNow, 0)) / rsiLen
+                r := dL == 0 ? 100.0 : dG == 0 ? 0.0 : 100 - 100 / (1 + dG / dL)
+            array.set(curRsi, i, r)
+
+// RSI confirma a direção? Devolve [ok, texto com os RSIs que confirmaram].
+rsiCheck(bool lg) =>
+    int nOn = 0
+    int nHit = 0
+    string lbl = ""
+    for i = 0 to 3
+        if array.get(rsOn, i)
+            nOn += 1
+            r = array.get(curRsi, i)
+            if not na(r) and (lg ? r < rsiOS : r > rsiOB)
+                nHit += 1
+                lbl := lbl + " " + str.tostring(array.get(rsMins, i)) + "m:" + str.tostring(r, "#")
+    [nOn > 0 and (rsiCombine == "Any" ? nHit > 0 : nHit == nOn), lbl]
+
+// ---------------------------------------------------------------------------
+// Filtro de liquidações: lê as liquidações de 1 minuto dos símbolos
+// configurados e guarda-as (hora, valor em USD) num buffer. Em cada minuto
+// de avaliação agrupa-as em velas do timeframe escolhido (ex.: 5m) e vê a
+// vela atual e as N anteriores, só com minutos já fechados até esse minuto
+// (sem olhar para o futuro).
+// ---------------------------------------------------------------------------
+// Tickers de liquidações (formato da biblioteca oficial TradingView/Request):
+//   por exchange: "<EXCHANGE>:<CONTRATO>_LQSELL" (longs liquidados) / "_LQBUY" (shorts liquidados)
+//   agregado:     "CRYPTO:<COIN>_LQSELL" / "CRYPTO:<COIN>_LQBUY"
+// Confirmado com dados reais (Bybit, queda forte): LQSELL 3.64M vs LQBUY
+// 0.06M -> LQSELL = longs liquidados (venda forçada).
+// O valor liquidado está no campo VOLUME desses símbolos.
+lqCoin = str.replace(str.upper(syminfo.basecurrency), "XTVC", "")
+lqLongTicker  = liqSource == "Custom" ? liqLongSym  : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQSELL" : ticker.standard(syminfo.tickerid) + "_LQSELL"
+lqShortTicker = liqSource == "Custom" ? liqShortSym : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQBUY"  : ticker.standard(syminfo.tickerid) + "_LQBUY"
+if useLiq and liqSource == "Custom" and (liqLongSym == "" or liqShortSym == "")
+    runtime.error("Liquidations source = Custom: define os dois símbolos (ou escolhe 'Chart exchange' / 'Aggregated').")
+if useLiq and liqSource == "Chart exchange" and not str.endswith(syminfo.ticker, ".P") and syminfo.type != "futures"
+    runtime.error("Liquidations source = Chart exchange precisa de um gráfico de contrato perpétuo/futuro (ex.: BYBIT:BTCUSDT.P). Gráfico atual: " + syminfo.tickerid + ". Muda o gráfico ou usa 'Aggregated'.")
+
+// Unidades: "base" = BTC (converte com o preço), "quote" = já em USD/USDT.
+string lqVolType = ""
+if useLiq
+    lqVolType := request.security(lqLongTicker, "1D", syminfo.volumetype, ignore_invalid_symbol = true)
+lqInBase = liqUnits == "BTC" or (liqUnits == "Auto" and lqVolType == "base")
+if useLiq and not (liq1On or liq5On or liq15On or liq30On or liq60On)
+    runtime.error("Liga pelo menos uma janela de liquidações (1m/5m/15m/30m/1h).")
+
+lqMins = array.from(1, 5, 15, 30, 60)
+lqOn   = array.from(liq1On, liq5On, liq15On, liq30On, liq60On)
+var array<int>   lqLongT  = array.new<int>()
+var array<float> lqLongV  = array.new<float>()
+var array<int>   lqShortT = array.new<int>()
+var array<float> lqShortV = array.new<float>()
+var int lqLastLongT  = 0
+var int lqLastShortT = 0
+var bool lqGotData = false
+
+
+lqIngest(array<int> tArr, array<float> vArr, array<int> bufT, array<float> bufV, int lastT) =>
+    int newLast = lastT
+    n = array.size(tArr)
+    if n > 0
+        for i = 0 to n - 1
+            t = array.get(tArr, i)
+            v = array.get(vArr, i)
+            if t > newLast and not na(v)
+                array.push(bufT, t)
+                array.push(bufV, lqInBase ? v * close : v)
+                newLast := t
+    // Mantém só a última 1h (+ margem).
+    while array.size(bufT) > 0 and array.get(bufT, 0) < time - (liqLookback + 2) * 3600000
+        array.shift(bufT)
+        array.shift(bufV)
+    newLast
+
+if useLiq
+    lLT = array.new<int>()
+    lLV = array.new<float>()
+    lST = array.new<int>()
+    lSV = array.new<float>()
+    if timeframe.in_seconds(timeframe.period) > 60
+        lLT := request.security_lower_tf(lqLongTicker,  "1", time,   ignore_invalid_symbol = true)
+        lLV := request.security_lower_tf(lqLongTicker,  "1", volume, ignore_invalid_symbol = true)
+        lST := request.security_lower_tf(lqShortTicker, "1", time,   ignore_invalid_symbol = true)
+        lSV := request.security_lower_tf(lqShortTicker, "1", volume, ignore_invalid_symbol = true)
+    else
+        [lt1, lv1] = request.security(lqLongTicker,  "1", [time, volume], ignore_invalid_symbol = true)
+        [st1, sv1] = request.security(lqShortTicker, "1", [time, volume], ignore_invalid_symbol = true)
+        if not na(lt1)
+            array.push(lLT, lt1)
+            array.push(lLV, lv1)
+        if not na(st1)
+            array.push(lST, st1)
+            array.push(lSV, sv1)
+    lqLastLongT  := lqIngest(lLT, lLV, lqLongT, lqLongV, lqLastLongT)
+    lqLastShortT := lqIngest(lST, lSV, lqShortT, lqShortV, lqLastShortT)
+    if array.size(lqLongT) > 0 or array.size(lqShortT) > 0
+        lqGotData := true
+
+// Liquidações confirmam a direção no minuto que abriu em mT?
+// Long -> liquidações de LONGS; short -> liquidações de SHORTS.
+// Velas de liquidações alinhadas ao relógio (ex.: 5m = 10:00, 10:05, ...).
+// Ok se a vela que contém o minuto mT (só com os minutos já fechados até mT)
+// OU uma das 'liqLookback' velas anteriores tiver liquidações >= liqMin.
+// Long -> liquidações de LONGS; short -> liquidações de SHORTS.
+liqCheck(bool lg, int mT) =>
+    bufT = lg ? lqLongT : lqShortT
+    bufV = lg ? lqLongV : lqShortV
+    int nOn = 0
+    int nHit = 0
+    string lbl = ""
+    nb = array.size(bufT)
+    for j = 0 to 4
+        if array.get(lqOn, j)
+            nOn += 1
+            tfMs = array.get(lqMins, j) * 60000
+            curB = int(math.floor(mT / tfMs))
+            sums = array.new<float>(liqLookback + 1, 0.0)
+            if nb > 0
+                for i = 0 to nb - 1
+                    t = array.get(bufT, i)
+                    if t <= mT
+                        k = curB - int(math.floor(t / tfMs))
+                        if k >= 0 and k <= liqLookback
+                            array.set(sums, k, array.get(sums, k) + array.get(bufV, i))
+            best = array.max(sums)
+            if best >= liqMin
+                nHit += 1
+                lbl := lbl + " " + str.tostring(array.get(lqMins, j)) + "m:" + str.tostring(best / 1000000, "#.#") + "M"
+    [nOn > 0 and (liqCombine == "Any" ? nHit > 0 : nHit == nOn), lbl]
+
+// Maior vela de liquidações (atual ou N anteriores) entre os timeframes ligados.
+liqBestAll(bool lg, int mT) =>
+    bufT = lg ? lqLongT : lqShortT
+    bufV = lg ? lqLongV : lqShortV
+    float bestAll = 0.0
+    nb = array.size(bufT)
+    for j = 0 to 4
+        if array.get(lqOn, j)
+            tfMs = array.get(lqMins, j) * 60000
+            curB = int(math.floor(mT / tfMs))
+            sums = array.new<float>(liqLookback + 1, 0.0)
+            if nb > 0
+                for i = 0 to nb - 1
+                    t = array.get(bufT, i)
+                    if t <= mT
+                        k = curB - int(math.floor(t / tfMs))
+                        if k >= 0 and k <= liqLookback
+                            array.set(sums, k, array.get(sums, k) + array.get(bufV, i))
+            bestAll := math.max(bestAll, array.max(sums))
+    bestAll
+
+useConfirm = useRsi or useLiq
+
+m1H = array.new<float>()
+m1L = array.new<float>()
+m1C = array.new<float>()
+m1T = array.new<int>()
+if useConfirm
+    if chartSec > 60
+        m1H := request.security_lower_tf(syminfo.tickerid, "1", high)
+        m1L := request.security_lower_tf(syminfo.tickerid, "1", low)
+        m1C := request.security_lower_tf(syminfo.tickerid, "1", close)
+        m1T := request.security_lower_tf(syminfo.tickerid, "1", time)
+    else
+        array.push(m1H, high)
+        array.push(m1L, low)
+        array.push(m1C, close)
+        array.push(m1T, time)
+
+lockKey(string k, float p) =>
+    if not map.contains(traded, k)
+        map.put(traded, k, true)
+        array.push(lockKeys, k)
+        array.push(lockPx, p)
+
+inWindow = time >= tradeFrom and time <= tradeTo
+allowLong  = tradeDir != "Short only"
+allowShort = tradeDir != "Long only"
+
+// 0) IDs de entradas realmente executadas (trades abertas + trades que
+//    fecharam desde a última barra, ex.: entrou e saiu na mesma vela).
+var int lastClosedCount = 0
+execIds = array.new<string>()
+if strategy.opentrades > 0
+    for t = 0 to strategy.opentrades - 1
+        array.push(execIds, strategy.opentrades.entry_id(t))
+if strategy.closedtrades > lastClosedCount
+    for t = lastClosedCount to strategy.closedtrades - 1
+        array.push(execIds, strategy.closedtrades.entry_id(t))
+    lastClosedCount := strategy.closedtrades
+
+// 1) Ordens da barra anterior que foram executadas -> bloqueia a zona e
+//    todos os POCs que a compõem.
+if array.size(pendIds) > 0
+    for i = 0 to array.size(pendIds) - 1
+        p = array.get(pendPx, i)
+        if array.includes(execIds, array.get(pendIds, i)) and not map.contains(filled, array.get(pendIds, i))
+            base = array.get(pendBase, i)
+            map.put(filled, array.get(pendIds, i), true)
+            map.put(fillCnt, base, (map.contains(fillCnt, base) ? map.get(fillCnt, base) : 0) + 1)
+            lockKey(base, p)
+            members = str.split(array.get(pendMem, i), ";")
+            for m in members
+                lockKey(m, str.tonumber(str.substring(m, 2)))
+            needSel := true
+
+// 1b) Re-arm: liberta POCs/zonas de que o preço já se afastou o suficiente.
+if reuseTouched and array.size(lockKeys) > 0
+    for i = array.size(lockKeys) - 1 to 0
+        lp = array.get(lockPx, i)
+        if na(lp) or math.abs(close - lp) / lp * 100 >= rearmPct
+            map.remove(traded, array.get(lockKeys, i))
+            array.remove(lockKeys, i)
+            array.remove(lockPx, i)
+            needSel := true
+
+// 1c) Filtro RSI: percorre os passos (velas do RSI TF, ou a própria barra)
+//     desta barra do gráfico, por ordem.
+//     Quando um passo toca uma zona "armada" (da barra anterior), nasce um
+//     sinal que espera até 'rsiWindow' minutos pelo RSI no extremo.
+//     Quando o RSI confirma (e não há posição), entra a mercado - executa na
+//     abertura da barra seguinte do gráfico (no gráfico de 1m: o minuto
+//     seguinte; em timeframes maiores pode haver atraso, ver notas).
+enteredNow = false
+if useConfirm
+    nMin = array.size(m1H)
+    if nMin > 0
+        for k = 0 to nMin - 1
+            mH = array.get(m1H, k)
+            mL = array.get(m1L, k)
+            if useRsi
+                rsiFeed(array.get(m1T, k), array.get(m1C, k))
+            mT = array.get(m1T, k)
+            // Toques nas zonas armadas -> novos sinais.
+            if not enteredNow and array.size(pendBase) > 0
+                for i = 0 to array.size(pendBase) - 1
+                    b  = array.get(pendBase, i)
+                    lg = array.get(pendLong, i)
+                    ep = array.get(pendPx, i)
+                    touched = lg ? mL <= ep : mH >= ep
+                    if touched and not array.includes(trgBase, b) and not map.contains(traded, b)
+                        array.push(trgBase, b)
+                        array.push(trgLong, lg)
+                        array.push(trgEntry, ep)
+                        array.push(trgSL, array.get(pendSL, i))
+                        array.push(trgMem, array.get(pendMem, i))
+                        array.push(trgCnt, array.get(pendCnt, i))
+                        array.push(trgExp, mT + rsiWindow * 60000)
+            // Expira sinais antigos ou cuja zona foi rompida até ao stop.
+            if array.size(trgBase) > 0
+                for i = array.size(trgBase) - 1 to 0
+                    lg = array.get(trgLong, i)
+                    sl = array.get(trgSL, i)
+                    broken = not na(sl) and (lg ? mL <= sl : mH >= sl)
+                    if mT > array.get(trgExp, i) or broken
+                        array.remove(trgBase, i)
+                        array.remove(trgLong, i)
+                        array.remove(trgEntry, i)
+                        array.remove(trgSL, i)
+                        array.remove(trgMem, i)
+                        array.remove(trgCnt, i)
+                        array.remove(trgExp, i)
+            // Entrada quando o RSI deste passo confirma.
+            if not enteredNow and strategy.position_size == 0 and inWindow and array.size(trgBase) > 0
+                for i = array.size(trgBase) - 1 to 0
+                    lg = array.get(trgLong, i)
+                    sl = array.get(trgSL, i)
+                    [rsiOk0, rsiLbl] = rsiCheck(lg)
+                    [liqOk0, liqLbl] = liqCheck(lg, mT)
+                    rsiOk = not useRsi or rsiOk0
+                    liqOk = not useLiq or liqOk0
+                    slOk = na(sl) or (lg ? sl < close : sl > close)
+                    if not enteredNow and rsiOk and liqOk and slOk
+                        b = array.get(trgBase, i)
+                        cnt = array.get(trgCnt, i)
+                        eid = b + "#" + str.tostring(map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0)
+                        float tp = tpPct > 0 ? (lg ? close * (1 + tpPct / 100) : close * (1 - tpPct / 100)) : na
+                        mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
+                        strategy.entry(eid, lg ? strategy.long : strategy.short, qty = strategy.equity * basePct / 100 * mult / close,
+                             comment = (lg ? "L " : "S ") + eid + (useRsi ? " RSI" + rsiLbl : "") + (useLiq ? " LIQ" + liqLbl : ""))
+                        strategy.exit("X|" + eid, from_entry = eid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+                        map.put(filled, eid, true)
+                        map.put(fillCnt, b, (map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0) + 1)
+                        lockKey(b, array.get(trgEntry, i))
+                        for m in str.split(array.get(trgMem, i), ";")
+                            lockKey(m, str.tonumber(str.substring(m, 2)))
+                        needSel := true
+                        enteredNow := true
+    if enteredNow
+        array.clear(trgBase)
+        array.clear(trgLong)
+        array.clear(trgEntry)
+        array.clear(trgSL)
+        array.clear(trgMem)
+        array.clear(trgCnt)
+        array.clear(trgExp)
+
+// 2) POCs candidatos: em cada timeframe junta TODOS os POCs (New + Naked +
+//    Tapped, sem distinção), tira os preços já usados e fica com os N mais
+//    próximos do preço. Recalculado só ao fecho do dia ou quando algum nível
+//    é usado (para não pesar em cada barra).
+priceKey(float p) =>
+    "P|" + str.tostring(p, format.mintick)
+
+buildTradeSel(TFState st, float ref) =>
+    pool = array.new<float>()
+    // Só entram os tipos ligados nas settings (o que não aparece não é negociado).
+    if st.showNew and st.hasNew and not map.contains(traded, priceKey(st.newPrice))
+        array.push(pool, st.newPrice)
+    if st.showNaked
+        for p in st.nakedPrices
+            if not map.contains(traded, priceKey(p))
+                array.push(pool, p)
+    if st.showTapped and st.hasTapped
+        for p in st.tappedPrices
+            if not map.contains(traded, priceKey(p))
+                array.push(pool, p)
+    st.tradeSel := selectClosest(pool, nTradeLevels, ref)
+
+if hadNewDay or nakedLive or tappedLive
+    needSel := true
+if needSel
+    buildTradeSel(st1D, close)
+    buildTradeSel(st2D, close)
+    buildTradeSel(st3D, close)
+    buildTradeSel(st5D, close)
+    buildTradeSel(st1W, close)
+    buildTradeSel(st2W, close)
+    buildTradeSel(st1M, close)
+    needSel := false
+
+candKey = array.new<string>()
+candPx  = array.new<float>()
+
+if inWindow
+    for st in allTF
+        for p in st.tradeSel
+            key = priceKey(p)
+            if not map.contains(traded, key) and not array.includes(candKey, key)
+                array.push(candKey, key)
+                array.push(candPx, p)
+
+// 3) Agrupa em zonas (ordenado por preço, single-linkage com largura máxima).
+zLo  = array.new<float>()
+zHi  = array.new<float>()
+zCnt = array.new<int>()
+zMem = array.new<string>()
+nCand = array.size(candPx)
+if nCand > 0
+    ordIdx = array.sort_indices(candPx, order.ascending)
+    float curLo = na
+    float curHi = na
+    int curCnt = 0
+    string curMem = ""
+    for k = 0 to nCand - 1
+        j = array.get(ordIdx, k)
+        p = array.get(candPx, j)
+        key = array.get(candKey, j)
+        if na(curLo)
+            curLo := p
+            curHi := p
+            curCnt := 1
+            curMem := key
+        else if p - curHi <= curHi * clusterPct / 100 and p - curLo <= curLo * maxZonePct / 100
+            curHi := p
+            curCnt += 1
+            curMem := curMem + ";" + key
+        else
+            array.push(zLo, curLo)
+            array.push(zHi, curHi)
+            array.push(zCnt, curCnt)
+            array.push(zMem, curMem)
+            curLo := p
+            curHi := p
+            curCnt := 1
+            curMem := key
+    array.push(zLo, curLo)
+    array.push(zHi, curHi)
+    array.push(zCnt, curCnt)
+    array.push(zMem, curMem)
+
+// 4) Uma ordem por zona elegível - só quando NÃO há posição aberta.
+flat = strategy.position_size == 0 and not enteredNow
+newIds = array.new<string>()
+newBase = array.new<string>()
+newPx  = array.new<float>()
+newMem = array.new<string>()
+newLong = array.new<bool>()
+newSL  = array.new<float>()
+newTP  = array.new<float>()
+newQty = array.new<float>()
+newCnt = array.new<int>()
+nZones = array.size(zLo)
+if nZones > 0 and flat
+    for z = 0 to nZones - 1
+        lo  = array.get(zLo, z)
+        hi  = array.get(zHi, z)
+        cnt = array.get(zCnt, z)
+        inside = close >= lo and close <= hi
+        if cnt >= minPocsZone and not inside
+            isLong = hi < close
+            entryPx = entryMode == "Zone middle" ? (lo + hi) / 2 : (isLong ? hi : lo)
+            zid = "Z|" + str.tostring(lo, format.mintick) + "-" + str.tostring(hi, format.mintick) + "|" + str.tostring(cnt)
+            if ((isLong and allowLong) or (not isLong and allowShort)) and not map.contains(traded, zid) and not array.includes(newBase, zid)
+                farEdge = isLong ? lo : hi
+                float sl = slPct > 0 ? (isLong ? farEdge * (1 - slPct / 100) : farEdge * (1 + slPct / 100)) : na
+                float tp = tpPct > 0 ? (isLong ? entryPx * (1 + tpPct / 100) : entryPx * (1 - tpPct / 100)) : na
+                mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
+                qty = strategy.equity * basePct / 100 * mult / entryPx
+                array.push(newIds, zid + "#" + str.tostring(map.contains(fillCnt, zid) ? map.get(fillCnt, zid) : 0))
+                array.push(newBase, zid)
+                array.push(newPx, entryPx)
+                array.push(newMem, array.get(zMem, z))
+                array.push(newLong, isLong)
+                array.push(newSL, sl)
+                array.push(newTP, tp)
+                array.push(newQty, qty)
+                array.push(newCnt, cnt)
+
+// 5) Cancela ordens de zonas que deixaram de existir (o SL/TP de entradas já
+//    executadas mantém-se).
+if not useConfirm and array.size(pendIds) > 0
+    for i = 0 to array.size(pendIds) - 1
+        oid = array.get(pendIds, i)
+        if not array.includes(newIds, oid) and not map.contains(filled, oid)
+            strategy.cancel(oid)
+            if not map.contains(filled, oid)
+                strategy.cancel("X|" + oid)
+
+// 6) Coloca/atualiza as ordens. O nome do grupo OCA muda a cada trade, para
+//    o grupo de uma trade antiga não cancelar as ordens da seguinte.
+ocaName = "POC" + str.tostring(strategy.closedtrades + strategy.opentrades)
+array.clear(pendIds)
+array.clear(pendBase)
+array.clear(pendPx)
+array.clear(pendMem)
+array.clear(pendLong)
+array.clear(pendSL)
+array.clear(pendCnt)
+if array.size(newIds) > 0
+    for i = 0 to array.size(newIds) - 1
+        oid = array.get(newIds, i)
+        p   = array.get(newPx, i)
+        isLong = array.get(newLong, i)
+        sl = array.get(newSL, i)
+        tp = array.get(newTP, i)
+        // Com o filtro RSI as zonas ficam só "armadas" (sem ordem limit): a
+        // entrada é feita no passo 1c, quando o RSI confirma.
+        if not useConfirm
+            strategy.entry(oid, isLong ? strategy.long : strategy.short, qty = array.get(newQty, i), limit = p,
+                 oca_name = ocaName, oca_type = strategy.oca.cancel,
+                 comment = (isLong ? "L " : "S ") + oid)
+            if not na(sl) or not na(tp)
+                strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+        array.push(pendLong, isLong)
+        array.push(pendSL, sl)
+        array.push(pendCnt, array.get(newCnt, i))
+        array.push(pendIds, oid)
+        array.push(pendBase, array.get(newBase, i))
+        array.push(pendPx, p)
+        array.push(pendMem, array.get(newMem, i))
+
+// Fecha tudo fora da janela de trading.
+if not inWindow and strategy.position_size != 0
+    strategy.close_all(comment = "Fora da janela")
+
+// Tabela de diagnóstico (última vela).
+if barstate.islast and showDiag
+    var table dg = table.new(position.bottom_left, 2, 7, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+    lastT = array.size(m1T) > 0 ? array.last(m1T) : time
+    rsiTxt = ""
+    for i = 0 to 3
+        if array.get(rsOn, i)
+            rsiTxt := rsiTxt + str.tostring(array.get(rsMins, i)) + "m:" + str.tostring(array.get(curRsi, i), "#.0") + " "
+    table.cell(dg, 0, 0, "Posição", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 0, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat", text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 1, "Zonas armadas", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 1, str.tostring(array.size(pendBase)), text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 2, "Sinais à espera (zona tocada)", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 2, str.tostring(array.size(trgBase)), text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 3, "RSI", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 3, useRsi ? rsiTxt : "off", text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 4, "Liq. longs (maior vela)", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 4, useLiq ? str.tostring(liqBestAll(true, lastT) / 1000000, "#.##") + "M  " + lqLongTicker : "off", text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 5, "Liq. shorts (maior vela)", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 5, useLiq ? str.tostring(liqBestAll(false, lastT) / 1000000, "#.##") + "M  " + lqShortTicker : "off", text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 6, "Unidades liq.", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 6, useLiq ? (lqInBase ? "BTC -> USD" : "USD") + " (" + lqVolType + ")" : "off", text_color = color.white, text_size = size.small)
+
+// Aviso se o filtro de liquidações está ligado mas não chegam dados.
+if barstate.islast and useLiq and not lqGotData
+    var table lqWarn = table.new(position.bottom_right, 1, 1, bgcolor = color.new(color.red, 20))
+    table.cell(lqWarn, 0, 0, "Sem dados de liquidações para " + lqLongTicker + " / " + lqShortTicker + " (ver 'Liquidations filter')", text_color = color.white, text_size = size.small)
+
+// Desenho das zonas (só na última barra).
+var array<box> zoneBoxes = array.new<box>()
+if barstate.islast
+    for b in zoneBoxes
+        box.delete(b)
+    array.clear(zoneBoxes)
+    if showZones and nZones > 0
+        for z = 0 to nZones - 1
+            cnt = array.get(zCnt, z)
+            if cnt >= minPocsZone
+                lo = array.get(zLo, z)
+                hi = array.get(zHi, z)
+                col = hi < close ? color.new(color.teal, 80) : lo > close ? color.new(color.red, 80) : color.new(color.orange, 80)
+                array.push(zoneBoxes, box.new(bar_index - 30, hi, bar_index + 10, lo, border_color = color.new(col, 40),
+                     bgcolor = col, extend = extend.right, text = str.tostring(cnt) + " POC" + (cnt > 1 ? "s" : ""),
+                     text_color = color.gray, text_size = size.small, text_halign = text.align_right))
+
+// ---------------------------------------------------------------------------
+// Desenho (igual ao indicador)
+// ---------------------------------------------------------------------------
+showLevels = lineThickness > 0
+
+drawLevel(color col, float price) =>
+    line.new(time[1], price, time, price, xloc = xloc.bar_time, extend = extend.both, color = col, style = line.style_dotted, width = lineThickness)
+
+drawTF(TFState st, array<float> nakedSel, float tappedSel) =>
+    if not na(st.lineNew)
+        line.delete(st.lineNew)
+    if array.size(st.nakedLines) > 0
+        for i = 0 to array.size(st.nakedLines) - 1
+            line.delete(array.get(st.nakedLines, i))
+    array.clear(st.nakedLines)
+    if not na(st.lineTapped)
+        line.delete(st.lineTapped)
+    if showLevels
+        if st.showNew and st.hasNew
+            st.lineNew := drawLevel(newColor, st.newPrice)
+        if st.showNaked
+            i = 0
+            while i < array.size(nakedSel)
+                p = array.get(nakedSel, i)
+                if not na(p)
+                    array.push(st.nakedLines, drawLevel(nakedColor, p))
+                i += 1
+        if st.showTapped and st.hasTapped and not na(tappedSel)
+            st.lineTapped := drawLevel(tappedColor, tappedSel)
+
+if barstate.islast
+    drawTF(st1D, sel1D, selTp1D)
+    drawTF(st2D, sel2D, selTp2D)
+    drawTF(st3D, sel3D, selTp3D)
+    drawTF(st5D, sel5D, selTp5D)
+    drawTF(st1W, sel1W, selTp1W)
+    drawTF(st2W, sel2W, selTp2W)
+    drawTF(st1M, sel1M, selTp1M)
+
+rawNew1D = st1D.showNew and st1D.hasNew ? st1D.newPrice : float(na)
+rawNew2D = st2D.showNew and st2D.hasNew ? st2D.newPrice : float(na)
+rawNew3D = st3D.showNew and st3D.hasNew ? st3D.newPrice : float(na)
+rawNew5D = st5D.showNew and st5D.hasNew ? st5D.newPrice : float(na)
+rawNew1W = st1W.showNew and st1W.hasNew ? st1W.newPrice : float(na)
+rawNew2W = st2W.showNew and st2W.hasNew ? st2W.newPrice : float(na)
+rawNew1M = st1M.showNew and st1M.hasNew ? st1M.newPrice : float(na)
+
+plot(rawNew1D, title = "1D", color = na(rawNew1D) ? na : newColor, display = display.price_scale)
+plot(rawNew2D, title = "2D", color = na(rawNew2D) ? na : newColor, display = display.price_scale)
+plot(rawNew3D, title = "3D", color = na(rawNew3D) ? na : newColor, display = display.price_scale)
+plot(rawNew5D, title = "5D", color = na(rawNew5D) ? na : newColor, display = display.price_scale)
+plot(rawNew1W, title = "1W", color = na(rawNew1W) ? na : newColor, display = display.price_scale)
+plot(rawNew2W, title = "2W", color = na(rawNew2W) ? na : newColor, display = display.price_scale)
+plot(rawNew1M, title = "1M", color = na(rawNew1M) ? na : newColor, display = display.price_scale)
+
+plot(array.get(sel1D, 0), title = "1D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel1D, 1), title = "1D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel1D, 2), title = "1D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel2D, 0), title = "2D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel2D, 1), title = "2D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel2D, 2), title = "2D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel3D, 0), title = "3D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel3D, 1), title = "3D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel3D, 2), title = "3D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel5D, 0), title = "5D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel5D, 1), title = "5D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel5D, 2), title = "5D", color = nakedColor, display = display.price_scale)
+plot(array.get(sel1W, 0), title = "1W", color = nakedColor, display = display.price_scale)
+plot(array.get(sel1W, 1), title = "1W", color = nakedColor, display = display.price_scale)
+plot(array.get(sel2W, 0), title = "2W", color = nakedColor, display = display.price_scale)
+plot(array.get(sel2W, 1), title = "2W", color = nakedColor, display = display.price_scale)
+plot(array.get(sel1M, 0), title = "1M", color = nakedColor, display = display.price_scale)
+plot(array.get(sel1M, 1), title = "1M", color = nakedColor, display = display.price_scale)
+
+plot(selTp1D, title = "1DT", color = tappedColor, display = display.price_scale)
+plot(selTp2D, title = "2DT", color = tappedColor, display = display.price_scale)
+plot(selTp3D, title = "3DT", color = tappedColor, display = display.price_scale)
+plot(selTp5D, title = "5DT", color = tappedColor, display = display.price_scale)
+plot(selTp1W, title = "1WT", color = tappedColor, display = display.price_scale)
+plot(selTp2W, title = "2WT", color = tappedColor, display = display.price_scale)
+plot(selTp1M, title = "1MT", color = tappedColor, display = display.price_scale)
