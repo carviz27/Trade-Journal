@@ -95,9 +95,9 @@ useLiq = input.bool(true, "Require liquidations", group = grpLiq,
      tooltip = "ON: só entra se as liquidações dos últimos X minutos forem >= ao mínimo - LONG liquidations para longs, SHORT liquidations para shorts. Combina com o filtro RSI (os dois têm de confirmar no mesmo minuto).")
 liqSource = input.string("Chart exchange", "Liquidations source", options = ["Chart exchange", "Aggregated (all exchanges)", "Custom"], group = grpLiq,
      tooltip = "Chart exchange: liquidações da exchange/contrato do gráfico (ex.: BYBIT:BTCUSDT.P -> BYBIT:BTCUSDT.P_LQSELL / _LQBUY). Aggregated: todas as exchanges suportadas (CRYPTO:BTC_LQSELL / _LQBUY), igual ao indicador 'Liquidations' do TradingView em modo agregado. Custom: escreves os símbolos abaixo. Os dados são os mesmos do indicador Liquidations do TradingView. O gráfico tem de ser um contrato perpétuo/futuro (.P), não spot, para 'Chart exchange'.")
-liqLongSym  = input.symbol("", "Custom long liquidations symbol", group = grpLiq,
+liqLongSym  = input.symbol("", "Custom long liquidations symbol", group = grpLiq active = liqSource == "Custom",
      tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQSELL (Liquidations Sell = longs liquidados).")
-liqShortSym = input.symbol("", "Custom short liquidations symbol", group = grpLiq,
+liqShortSym = input.symbol("", "Custom short liquidations symbol", group = grpLiq active = liqSource == "Custom",
      tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQBUY (Liquidations Buy = shorts liquidados).")
 liqUnits = input.string("Auto", "Values are in", options = ["Auto", "USD", "BTC"], group = grpLiq,
      tooltip = "Consoante a exchange, o TradingView dá as liquidações em BTC ou em USD/USDT. Auto: deteta pelo tipo de volume do símbolo de liquidações e converte para USD (BTC x preço) quando é preciso.")
