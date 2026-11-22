@@ -82,6 +82,8 @@ rsiCombine = input.string("Any", "Combine timeframes", options = ["Any", "All"],
 rsiLen = input.int(14, "RSI length", minval = 2, group = grpRsi)
 rsiOB  = input.float(70, "Overbought (shorts acima de)", group = grpRsi)
 rsiOS  = input.float(30, "Oversold (longs abaixo de)", group = grpRsi)
+preLimit = input.bool(true, "Limit at POC if already confirmed", group = grpRsi,
+     tooltip = "ON: se o RSI e as liquidações JÁ estiverem confirmados antes de o preço chegar à zona, fica uma ordem LIMIT no POC e a entrada é exatamente no nível. Se ainda não estiverem confirmados, funciona como antes (espera pelo toque + confirmação e entra a mercado).")
 rsiWindow = input.int(3, "Minutes after touch to wait for RSI", minval = 0, maxval = 120, group = grpRsi,
      tooltip = "Depois de o preço tocar a zona, durante quantos minutos o sinal fica à espera de o RSI chegar ao extremo. 0 = o RSI tem de estar no extremo no próprio minuto do toque. O sinal é cancelado se o preço chegar ao stop loss da zona.")
 
@@ -1130,6 +1132,10 @@ if not useConfirm and array.size(pendIds) > 0
 // 6) Coloca/atualiza as ordens. O nome do grupo OCA muda a cada trade, para
 //    o grupo de uma trade antiga não cancelar as ordens da seguinte.
 ocaName = "POC" + str.tostring(strategy.closedtrades + strategy.opentrades)
+// Momento atual para os filtros (último minuto avaliado nesta vela).
+lastStepT = array.size(m1T) > 0 ? array.last(m1T) : time
+prevPend = array.copy(pendIds)
+placedNow = array.new<string>()
 array.clear(pendIds)
 array.clear(pendBase)
 array.clear(pendPx)
@@ -1144,14 +1150,25 @@ if array.size(newIds) > 0
         isLong = array.get(newLong, i)
         sl = array.get(newSL, i)
         tp = array.get(newTP, i)
-        // Com o filtro RSI as zonas ficam só "armadas" (sem ordem limit): a
-        // entrada é feita no passo 1c, quando o RSI confirma.
-        if not useConfirm
+        // Sem filtros: ordem limit em todas as zonas.
+        // Com filtros (RSI/liquidações): a zona fica "armada" e a entrada é
+        // feita no passo 1c (toque + confirmação -> mercado) OU, se os filtros
+        // JÁ estiverem confirmados agora, com uma ordem limit no POC.
+        bool placeLimit = not useConfirm
+        string cmt = ""
+        if useConfirm and preLimit and flat
+            [rOk0, rLbl0] = rsiCheck(isLong)
+            [lOk0, lLbl0] = liqCheck(isLong, lastStepT)
+            if (not useRsi or rOk0) and (not useLiq or lOk0)
+                placeLimit := true
+                cmt := " LIM" + (useRsi ? " RSI" + rLbl0 : "") + (useLiq ? " LIQ" + lLbl0 : "")
+        if placeLimit
             strategy.entry(oid, isLong ? strategy.long : strategy.short, qty = array.get(newQty, i), limit = p,
                  oca_name = ocaName, oca_type = strategy.oca.cancel,
-                 comment = (isLong ? "L " : "S ") + oid)
+                 comment = (isLong ? "L " : "S ") + oid + cmt)
             if not na(sl) or not na(tp)
                 strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+            array.push(placedNow, oid)
         array.push(pendLong, isLong)
         array.push(pendSL, sl)
         array.push(pendCnt, array.get(newCnt, i))
@@ -1159,6 +1176,14 @@ if array.size(newIds) > 0
         array.push(pendBase, array.get(newBase, i))
         array.push(pendPx, p)
         array.push(pendMem, array.get(newMem, i))
+
+// Com filtros: cancela ordens limit da vela anterior que não foram
+// recolocadas agora (filtros deixaram de confirmar, zona mudou, ...).
+if useConfirm and array.size(prevPend) > 0
+    for oid in prevPend
+        if not array.includes(placedNow, oid) and not map.contains(filled, oid)
+            strategy.cancel(oid)
+            strategy.cancel("X|" + oid)
 
 // Fecha tudo fora da janela de trading.
 if not inWindow and strategy.position_size != 0
