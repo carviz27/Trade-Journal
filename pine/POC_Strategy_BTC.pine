@@ -737,8 +737,9 @@ rsiCheck(bool lg) =>
 // ---------------------------------------------------------------------------
 // Filtro de liquidações: lê as liquidações de 1 minuto dos símbolos
 // configurados e guarda-as (hora, valor em USD) num buffer. Em cada minuto
-// de avaliação soma as dos últimos N minutos (janela rolante), só com
-// minutos já fechados até esse minuto (sem olhar para o futuro).
+// de avaliação agrupa-as em velas do timeframe escolhido (ex.: 5m) e vê a
+// vela atual e as N anteriores, só com minutos já fechados até esse minuto
+// (sem olhar para o futuro).
 // ---------------------------------------------------------------------------
 // Tickers de liquidações (formato da biblioteca oficial TradingView/Request):
 //   por exchange: "<EXCHANGE>:<CONTRATO>_LQSELL" (longs liquidados) / "_LQBUY" (shorts liquidados)
