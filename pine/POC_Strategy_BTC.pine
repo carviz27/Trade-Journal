@@ -13,8 +13,8 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //   - Zona ABAIXO do preço atual -> ordem LIMIT de COMPRA (long).
 //   - Zona ACIMA  do preço atual -> ordem LIMIT de VENDA  (short).
 //   - Preço dentro de uma zona -> essa zona não gera ordens.
-//   - Cada zona/POC só é negociado UMA vez: depois de tocado, não volta a
-//     receber ordem (um naked pode voltar quando passa a tapped).
+//   - Todos os POCs são iguais (New/Naked/Tapped não interessa). Cada preço
+//     de POC só é negociado UMA vez: depois de tocado, nunca mais.
 //   - Saída: Stop Loss (para lá da zona) e Take Profit %. Como o
 //     TradingView não deixa ter long e short ao mesmo tempo, uma entrada no
 //     sentido contrário fecha (inverte) a posição atual.
@@ -36,14 +36,15 @@ grpCalc   = "Calculation"
 // ---------------------------------------------------------------------------
 tradeDir = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = grpStrat,
      tooltip = "Both: long nos POCs abaixo do preço e short nos POCs acima. Long only / Short only: só coloca as ordens desse lado.")
-tradeNew    = input.bool(true, "Trade 'New' POCs", group = grpStrat,
-     tooltip = "POC do último período fechado (linha cinzenta; ainda não passou a naked). Se estiver desligado, os New POCs também NÃO entram nas zonas.")
-tradeNaked  = input.bool(true, "Trade 'Naked' POCs", group = grpStrat,
-     tooltip = "POCs ainda nunca tocados. Entrada no primeiro toque.")
-tradeTapped = input.bool(true, "Trade 'Tapped' POCs", group = grpStrat,
-     tooltip = "POCs já tocados uma vez (mas ainda não removidos). Entrada no toque seguinte.")
-nTradeLevels = input.int(3, "Naked levels per timeframe", minval = 1, maxval = 20, group = grpStrat,
-     tooltip = "Quantos POCs naked (os mais próximos do preço) de cada timeframe recebem ordens. Os timeframes/tipos desligados nos grupos de baixo não são negociados.")
+nTradeLevels = input.int(3, "POCs per timeframe", minval = 1, maxval = 20, group = grpStrat,
+     tooltip = "Quantos POCs de cada timeframe (os mais próximos do preço) entram na estratégia. Todos os POCs são tratados por igual (New, Naked e Tapped não fazem diferença): cada preço de POC só é negociado uma vez.")
+trade1D = input.bool(true, "1D", group = grpStrat, inline = "trTF1")
+trade2D = input.bool(true, "2D", group = grpStrat, inline = "trTF1")
+trade3D = input.bool(true, "3D", group = grpStrat, inline = "trTF1")
+trade5D = input.bool(true, "5D", group = grpStrat, inline = "trTF1")
+trade1W = input.bool(true, "1W", group = grpStrat, inline = "trTF2")
+trade2W = input.bool(true, "2W", group = grpStrat, inline = "trTF2")
+trade1M = input.bool(true, "1M", group = grpStrat, inline = "trTF2")
 grpZone = "POC zones (clusters)"
 clusterPct = input.float(0.4, "Cluster distance %", minval = 0.0, step = 0.05, group = grpZone,
      tooltip = "POCs a menos desta distância (%) do POC vizinho juntam-se na mesma zona. 0 = cada POC é uma zona sozinho (comportamento antigo).")
@@ -294,8 +295,6 @@ updateNakedSel(TFState st, array<float> dest, float refPrice) =>
     while i < n
         array.set(dest, i, i < array.size(sel) ? array.get(sel, i) : float(na))
         i += 1
-    // Seleção usada para as ORDENS (pode ter mais níveis que os desenhados).
-    st.tradeSel := st.showNaked ? selectClosest(st.nakedPrices, nTradeLevels, refPrice) : array.new<float>()
 
 updateTappedSel(TFState st, float refPrice) =>
     sel = st.showTapped and st.hasTapped ? selectClosest(st.tappedPrices, 1, refPrice) : array.new<float>()
@@ -559,7 +558,7 @@ if hadNewDay
 // ============================================================================
 // ESTRATÉGIA: zonas de POCs (clusters) com ordens limit
 // ============================================================================
-// Os POCs candidatos (New/Naked/Tapped de todos os timeframes ligados) são
+// Os POCs candidatos (todos os tipos, de todos os timeframes ligados) são
 // ordenados por preço e agrupados em ZONAS: POCs seguidos a menos de
 // "Cluster distance %" uns dos outros ficam na mesma zona (até um máximo de
 // "Max zone width %"). Cada zona é tratada como UM só nível:
@@ -572,8 +571,10 @@ if hadNewDay
 //   - depois de a zona ser tocada, TODOS os POCs dela ficam marcados como
 //     usados e não voltam a gerar ordens.
 
-// traded: chaves (tipo|TF|preço) de POCs já usados, e IDs de zonas já executadas.
+// traded: preços de POCs já usados (chave = só o preço, seja qual for o tipo
+// ou timeframe) e IDs de zonas já executadas.
 var map<string, bool> traded = map.new<string, bool>()
+var bool needSel = true
 var array<string> pendIds = array.new<string>()
 var array<float>  pendPx  = array.new<float>()
 var array<string> pendMem = array.new<string>()
@@ -593,35 +594,50 @@ if array.size(pendIds) > 0
             members = str.split(array.get(pendMem, i), ";")
             for m in members
                 map.put(traded, m, true)
+            needSel := true
 
-// 2) POCs candidatos.
+// 2) POCs candidatos: em cada timeframe junta TODOS os POCs (New + Naked +
+//    Tapped, sem distinção), tira os preços já usados e fica com os N mais
+//    próximos do preço. Recalculado só ao fecho do dia ou quando algum nível
+//    é usado (para não pesar em cada barra).
+priceKey(float p) =>
+    "P|" + str.tostring(p, format.mintick)
+
+buildTradeSel(TFState st, bool on, float ref) =>
+    pool = array.new<float>()
+    if on
+        if st.hasNew and not map.contains(traded, priceKey(st.newPrice))
+            array.push(pool, st.newPrice)
+        for p in st.nakedPrices
+            if not map.contains(traded, priceKey(p))
+                array.push(pool, p)
+        for p in st.tappedPrices
+            if not map.contains(traded, priceKey(p))
+                array.push(pool, p)
+    st.tradeSel := selectClosest(pool, nTradeLevels, ref)
+
+if hadNewDay or nakedLive or tappedLive
+    needSel := true
+if needSel
+    buildTradeSel(st1D, trade1D, close)
+    buildTradeSel(st2D, trade2D, close)
+    buildTradeSel(st3D, trade3D, close)
+    buildTradeSel(st5D, trade5D, close)
+    buildTradeSel(st1W, trade1W, close)
+    buildTradeSel(st2W, trade2W, close)
+    buildTradeSel(st1M, trade1M, close)
+    needSel := false
+
 candKey = array.new<string>()
 candPx  = array.new<float>()
 
-addLevel(string tag, float p) =>
-    if not na(p)
-        key = tag + str.tostring(p, format.mintick)
-        if not map.contains(traded, key) and not array.includes(candKey, key)
-            array.push(candKey, key)
-            array.push(candPx, p)
-
-collectTF(TFState st, float tappedSel) =>
-    if tradeNew and st.showNew and st.hasNew
-        addLevel("NEW|" + st.tfName + "|", st.newPrice)
-    if tradeNaked and st.showNaked and array.size(st.tradeSel) > 0
-        for i = 0 to array.size(st.tradeSel) - 1
-            addLevel("NKD|" + st.tfName + "|", array.get(st.tradeSel, i))
-    if tradeTapped and st.showTapped and st.hasTapped
-        addLevel("TAP|" + st.tfName + "|", tappedSel)
-
 if inWindow
-    collectTF(st1D, float(na))
-    collectTF(st2D, selTp2D)
-    collectTF(st3D, selTp3D)
-    collectTF(st5D, selTp5D)
-    collectTF(st1W, selTp1W)
-    collectTF(st2W, selTp2W)
-    collectTF(st1M, selTp1M)
+    for st in allTF
+        for p in st.tradeSel
+            key = priceKey(p)
+            if not map.contains(traded, key) and not array.includes(candKey, key)
+                array.push(candKey, key)
+                array.push(candPx, p)
 
 // 3) Agrupa em zonas (ordenado por preço, single-linkage com largura máxima).
 zLo  = array.new<float>()
