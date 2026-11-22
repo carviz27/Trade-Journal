@@ -2,7 +2,7 @@
 strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, max_lines_count = 500, max_boxes_count = 200,
      initial_capital = 10000, currency = currency.USD,
      default_qty_type = strategy.percent_of_equity, default_qty_value = 5,
-     pyramiding = 20, commission_type = strategy.commission.percent, commission_value = 0.05,
+     pyramiding = 1, commission_type = strategy.commission.percent, commission_value = 0.05,
      slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
 
 // ============================================================================
@@ -16,9 +16,12 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //   - Todos os POCs são iguais (New/Naked/Tapped não interessa). Depois de
 //     negociado, um POC fica bloqueado até o preço se afastar 'Re-arm
 //     distance %' e depois pode voltar a ser usado (mesmo no próprio dia).
-//   - Saída: Stop Loss (para lá da zona) e Take Profit %. Como o
-//     TradingView não deixa ter long e short ao mesmo tempo, uma entrada no
-//     sentido contrário fecha (inverte) a posição atual.
+//   - Só UMA trade de cada vez: enquanto houver uma posição aberta não são
+//     colocadas novas ordens; a próxima só é aberta depois de a atual sair
+//     por Take Profit ou Stop Loss. Todas as ordens pendentes estão no mesmo
+//     grupo OCA: quando uma é executada, as outras são canceladas logo (mesmo
+//     dentro da mesma vela). Não há inversões de posição.
+//   - Saída: Stop Loss (para lá da zona) e Take Profit %.
 //
 // Só funciona em BTC (BTCUSDT, BTCUSD, BTCUSDT.P, XBTUSD, ...).
 // O cálculo dos POCs é o mesmo do indicador original.
@@ -127,6 +130,8 @@ waitForClose = input.bool(false, "Wait for timeframe closes", group = grpCalc)
 // Só BTC
 // ---------------------------------------------------------------------------
 isBTC = syminfo.basecurrency == "BTC" or syminfo.basecurrency == "XBT"
+if slPct == 0 and tpPct == 0
+    runtime.error("Define pelo menos Stop loss % ou Take profit %: só se abre uma nova trade depois de a atual sair por TP ou SL.")
 if not isBTC
     runtime.error("Esta estratégia só funciona em BTC. Símbolo atual: " + syminfo.tickerid)
 
@@ -603,13 +608,24 @@ inWindow = time >= tradeFrom and time <= tradeTo
 allowLong  = tradeDir != "Short only"
 allowShort = tradeDir != "Long only"
 
-// 1) As ordens colocadas na barra anterior estiveram ativas nesta barra: se o
-//    preço passou pelo preço de entrada, a zona foi executada -> marca a zona
-//    e todos os POCs que a compõem como usados.
+// 0) IDs de entradas realmente executadas (trades abertas + trades que
+//    fecharam desde a última barra, ex.: entrou e saiu na mesma vela).
+var int lastClosedCount = 0
+execIds = array.new<string>()
+if strategy.opentrades > 0
+    for t = 0 to strategy.opentrades - 1
+        array.push(execIds, strategy.opentrades.entry_id(t))
+if strategy.closedtrades > lastClosedCount
+    for t = lastClosedCount to strategy.closedtrades - 1
+        array.push(execIds, strategy.closedtrades.entry_id(t))
+    lastClosedCount := strategy.closedtrades
+
+// 1) Ordens da barra anterior que foram executadas -> bloqueia a zona e
+//    todos os POCs que a compõem.
 if array.size(pendIds) > 0
     for i = 0 to array.size(pendIds) - 1
         p = array.get(pendPx, i)
-        if high >= p and low <= p
+        if array.includes(execIds, array.get(pendIds, i)) and not map.contains(filled, array.get(pendIds, i))
             base = array.get(pendBase, i)
             map.put(filled, array.get(pendIds, i), true)
             map.put(fillCnt, base, (map.contains(fillCnt, base) ? map.get(fillCnt, base) : 0) + 1)
@@ -711,7 +727,8 @@ if nCand > 0
     array.push(zCnt, curCnt)
     array.push(zMem, curMem)
 
-// 4) Uma ordem por zona elegível.
+// 4) Uma ordem por zona elegível - só quando NÃO há posição aberta.
+flat = strategy.position_size == 0
 newIds = array.new<string>()
 newBase = array.new<string>()
 newPx  = array.new<float>()
@@ -721,7 +738,7 @@ newSL  = array.new<float>()
 newTP  = array.new<float>()
 newQty = array.new<float>()
 nZones = array.size(zLo)
-if nZones > 0
+if nZones > 0 and flat
     for z = 0 to nZones - 1
         lo  = array.get(zLo, z)
         hi  = array.get(zHi, z)
@@ -756,7 +773,9 @@ if array.size(pendIds) > 0
             if not map.contains(filled, oid)
                 strategy.cancel("X|" + oid)
 
-// 6) Coloca/atualiza as ordens.
+// 6) Coloca/atualiza as ordens. O nome do grupo OCA muda a cada trade, para
+//    o grupo de uma trade antiga não cancelar as ordens da seguinte.
+ocaName = "POC" + str.tostring(strategy.closedtrades + strategy.opentrades)
 array.clear(pendIds)
 array.clear(pendBase)
 array.clear(pendPx)
@@ -769,6 +788,7 @@ if array.size(newIds) > 0
         sl = array.get(newSL, i)
         tp = array.get(newTP, i)
         strategy.entry(oid, isLong ? strategy.long : strategy.short, qty = array.get(newQty, i), limit = p,
+             oca_name = ocaName, oca_type = strategy.oca.cancel,
              comment = (isLong ? "L " : "S ") + oid)
         if not na(sl) or not na(tp)
             strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
