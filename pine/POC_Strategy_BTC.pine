@@ -13,8 +13,9 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //   - Zona ABAIXO do preço atual -> ordem LIMIT de COMPRA (long).
 //   - Zona ACIMA  do preço atual -> ordem LIMIT de VENDA  (short).
 //   - Preço dentro de uma zona -> essa zona não gera ordens.
-//   - Todos os POCs são iguais (New/Naked/Tapped não interessa). Cada preço
-//     de POC só é negociado UMA vez: depois de tocado, nunca mais.
+//   - Todos os POCs são iguais (New/Naked/Tapped não interessa). Depois de
+//     negociado, um POC fica bloqueado até o preço se afastar 'Re-arm
+//     distance %' e depois pode voltar a ser usado (mesmo no próprio dia).
 //   - Saída: Stop Loss (para lá da zona) e Take Profit %. Como o
 //     TradingView não deixa ter long e short ao mesmo tempo, uma entrada no
 //     sentido contrário fecha (inverte) a posição atual.
@@ -59,6 +60,10 @@ sizeByCount = input.bool(false, "Scale size by POC count", group = grpZone,
 maxSizeMult = input.int(3, "Max size multiplier", minval = 1, maxval = 10, group = grpZone)
 basePct = input.float(5.0, "Base size (% equity)", minval = 0.1, step = 0.5, group = grpZone)
 showZones = input.bool(true, "Show zones", group = grpZone)
+reuseTouched = input.bool(true, "Re-use touched POCs", group = grpStrat,
+     tooltip = "ON: um POC/zona já negociado volta a poder ser usado (mesmo no próprio dia) depois de o preço se afastar dele pelo menos 'Re-arm distance %'. OFF: cada POC só é negociado uma vez.")
+rearmPct = input.float(0.5, "Re-arm distance %", minval = 0.0, step = 0.05, group = grpStrat,
+     tooltip = "Distância a que o preço tem de se afastar de um POC já negociado para ele voltar a receber ordem. Evita entrar várias vezes seguidas no mesmo toque.")
 slPct = input.float(1.0, "Stop loss % (beyond far edge of zone)", minval = 0.0, step = 0.1, group = grpStrat,
      tooltip = "O stop fica esta % para lá da extremidade OPOSTA da zona. 0 = sem stop loss.")
 tpPct = input.float(4.0, "Take profit %", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "0 = sem take profit (sai só por stop ou inversão).")
@@ -306,7 +311,7 @@ newTF(string name, bool showNew, bool showNaked, bool showTapped, int maxVisible
          nakedPrices = array.new<float>(), tappedPrices = array.new<float>(), tappedTaps = array.new<int>(),
          nakedLines = array.new<line>(), tradeSel = array.new<float>())
 
-var TFState st1D = newTF("1D", newShow1D, nakedShow1D, false,        3, false)
+var TFState st1D = newTF("1D", newShow1D, nakedShow1D, false,        3, true)
 var TFState st2D = newTF("2D", newShow2D, nakedShow2D, tappedShow2D, 3, true)
 var TFState st3D = newTF("3D", newShow3D, nakedShow3D, tappedShow3D, 3, true)
 var TFState st5D = newTF("5D", newShow5D, nakedShow5D, tappedShow5D, 3, true)
@@ -568,16 +573,31 @@ if hadNewDay
 //     compra/vende/compra/vende enquanto o preço anda no meio dos POCs)
 //   - stop loss fica para lá da extremidade OPOSTA da zona (+ buffer %), por
 //     isso andar dentro da zona não tira a posição.
-//   - depois de a zona ser tocada, TODOS os POCs dela ficam marcados como
-//     usados e não voltam a gerar ordens.
+//   - depois de a zona ser tocada, TODOS os POCs dela ficam bloqueados até o
+//     preço se afastar 'Re-arm distance %' (ver "Re-use touched POCs").
 
-// traded: preços de POCs já usados (chave = só o preço, seja qual for o tipo
-// ou timeframe) e IDs de zonas já executadas.
+// traded: BLOQUEIO temporário de preços de POCs (chave = só o preço, seja
+// qual for o tipo ou timeframe) e de zonas já executadas. Com "Re-use touched
+// POCs" ligado, o bloqueio sai quando o preço se afasta 'Re-arm distance %'.
 var map<string, bool> traded = map.new<string, bool>()
+var array<string> lockKeys = array.new<string>()
+var array<float>  lockPx   = array.new<float>()
+// filled: IDs de ordens já executadas (permanente, para nunca cancelar o
+// SL/TP de uma entrada aberta). fillCnt: nº de vezes que cada zona foi
+// executada, para cada nova entrada na mesma zona ter um ID diferente.
+var map<string, bool> filled = map.new<string, bool>()
+var map<string, int>  fillCnt = map.new<string, int>()
 var bool needSel = true
-var array<string> pendIds = array.new<string>()
-var array<float>  pendPx  = array.new<float>()
-var array<string> pendMem = array.new<string>()
+var array<string> pendIds  = array.new<string>()
+var array<string> pendBase = array.new<string>()
+var array<float>  pendPx   = array.new<float>()
+var array<string> pendMem  = array.new<string>()
+
+lockKey(string k, float p) =>
+    if not map.contains(traded, k)
+        map.put(traded, k, true)
+        array.push(lockKeys, k)
+        array.push(lockPx, p)
 
 inWindow = time >= tradeFrom and time <= tradeTo
 allowLong  = tradeDir != "Short only"
@@ -590,10 +610,23 @@ if array.size(pendIds) > 0
     for i = 0 to array.size(pendIds) - 1
         p = array.get(pendPx, i)
         if high >= p and low <= p
-            map.put(traded, array.get(pendIds, i), true)
+            base = array.get(pendBase, i)
+            map.put(filled, array.get(pendIds, i), true)
+            map.put(fillCnt, base, (map.contains(fillCnt, base) ? map.get(fillCnt, base) : 0) + 1)
+            lockKey(base, p)
             members = str.split(array.get(pendMem, i), ";")
             for m in members
-                map.put(traded, m, true)
+                lockKey(m, str.tonumber(str.substring(m, 2)))
+            needSel := true
+
+// 1b) Re-arm: liberta POCs/zonas de que o preço já se afastou o suficiente.
+if reuseTouched and array.size(lockKeys) > 0
+    for i = array.size(lockKeys) - 1 to 0
+        lp = array.get(lockPx, i)
+        if na(lp) or math.abs(close - lp) / lp * 100 >= rearmPct
+            map.remove(traded, array.get(lockKeys, i))
+            array.remove(lockKeys, i)
+            array.remove(lockPx, i)
             needSel := true
 
 // 2) POCs candidatos: em cada timeframe junta TODOS os POCs (New + Naked +
@@ -680,6 +713,7 @@ if nCand > 0
 
 // 4) Uma ordem por zona elegível.
 newIds = array.new<string>()
+newBase = array.new<string>()
 newPx  = array.new<float>()
 newMem = array.new<string>()
 newLong = array.new<bool>()
@@ -697,13 +731,14 @@ if nZones > 0
             isLong = hi < close
             entryPx = entryMode == "Zone middle" ? (lo + hi) / 2 : (isLong ? hi : lo)
             zid = "Z|" + str.tostring(lo, format.mintick) + "-" + str.tostring(hi, format.mintick) + "|" + str.tostring(cnt)
-            if ((isLong and allowLong) or (not isLong and allowShort)) and not map.contains(traded, zid)
+            if ((isLong and allowLong) or (not isLong and allowShort)) and not map.contains(traded, zid) and not array.includes(newBase, zid)
                 farEdge = isLong ? lo : hi
                 float sl = slPct > 0 ? (isLong ? farEdge * (1 - slPct / 100) : farEdge * (1 + slPct / 100)) : na
                 float tp = tpPct > 0 ? (isLong ? entryPx * (1 + tpPct / 100) : entryPx * (1 - tpPct / 100)) : na
                 mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
                 qty = strategy.equity * basePct / 100 * mult / entryPx
-                array.push(newIds, zid)
+                array.push(newIds, zid + "#" + str.tostring(map.contains(fillCnt, zid) ? map.get(fillCnt, zid) : 0))
+                array.push(newBase, zid)
                 array.push(newPx, entryPx)
                 array.push(newMem, array.get(zMem, z))
                 array.push(newLong, isLong)
@@ -718,11 +753,12 @@ if array.size(pendIds) > 0
         oid = array.get(pendIds, i)
         if not array.includes(newIds, oid)
             strategy.cancel(oid)
-            if not map.contains(traded, oid)
+            if not map.contains(filled, oid)
                 strategy.cancel("X|" + oid)
 
 // 6) Coloca/atualiza as ordens.
 array.clear(pendIds)
+array.clear(pendBase)
 array.clear(pendPx)
 array.clear(pendMem)
 if array.size(newIds) > 0
@@ -737,6 +773,7 @@ if array.size(newIds) > 0
         if not na(sl) or not na(tp)
             strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
         array.push(pendIds, oid)
+        array.push(pendBase, array.get(newBase, i))
         array.push(pendPx, p)
         array.push(pendMem, array.get(newMem, i))
 
