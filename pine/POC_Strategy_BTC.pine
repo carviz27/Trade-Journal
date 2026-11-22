@@ -28,7 +28,7 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //   - Filtro de liquidações (ligado por defeito): só entra se as liquidações
 //     de LONGS (para longs) / SHORTS (para shorts) numa vela de 5m (ou do
 //     timeframe escolhido) - a atual ou uma das 3 anteriores - forem >= 20M USD. Dados = indicador Liquidations do
-//     TradingView (tickers <CONTRATO>_LQSELL / _LQBUY, campo volume), da
+//     TradingView (tickers <CONTRATO>_LQBUY = longs / _LQSELL = shorts, campo volume), da
 //     exchange do gráfico ou agregados. Nesse modo a
 //     entrada é a mercado na barra seguinte do gráfico (no gráfico de 1m =
 //     minuto seguinte; em 15m pode chegar até 15 min de atraso).
@@ -94,11 +94,11 @@ grpLiq = "Liquidations filter"
 useLiq = input.bool(true, "Require liquidations", group = grpLiq,
      tooltip = "ON: só entra se as liquidações dos últimos X minutos forem >= ao mínimo - LONG liquidations para longs, SHORT liquidations para shorts. Combina com o filtro RSI (os dois têm de confirmar no mesmo minuto).")
 liqSource = input.string("Chart exchange", "Liquidations source", options = ["Chart exchange", "Aggregated (all exchanges)", "Custom"], group = grpLiq,
-     tooltip = "Chart exchange: liquidações da exchange/contrato do gráfico (ex.: BYBIT:BTCUSDT.P -> BYBIT:BTCUSDT.P_LQSELL / _LQBUY). Aggregated: todas as exchanges suportadas (CRYPTO:BTC_LQSELL / _LQBUY), igual ao indicador 'Liquidations' do TradingView em modo agregado. Custom: escreves os símbolos abaixo. Os dados são os mesmos do indicador Liquidations do TradingView. O gráfico tem de ser um contrato perpétuo/futuro (.P), não spot, para 'Chart exchange'.")
+     tooltip = "Chart exchange: liquidações da exchange/contrato do gráfico (ex.: BYBIT:BTCUSDT.P -> BYBIT:BTCUSDT.P_LQBUY / _LQSELL). Aggregated: todas as exchanges suportadas (CRYPTO:BTC_LQBUY / _LQSELL), igual ao indicador 'Liquidations' do TradingView em modo agregado. Custom: escreves os símbolos abaixo. Os dados são os mesmos do indicador Liquidations do TradingView. O gráfico tem de ser um contrato perpétuo/futuro (.P), não spot, para 'Chart exchange'.")
 liqLongSym  = input.symbol("", "Custom long liquidations symbol", group = grpLiq, active = liqSource == "Custom",
-     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQSELL (Liquidations Sell = longs liquidados).")
+     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQBUY (barras verdes do indicador Liquidations = longs liquidados).")
 liqShortSym = input.symbol("", "Custom short liquidations symbol", group = grpLiq, active = liqSource == "Custom",
-     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQBUY (Liquidations Buy = shorts liquidados).")
+     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQSELL (barras vermelhas do indicador Liquidations = shorts liquidados).")
 liqUnits = input.string("Auto", "Values are in", options = ["Auto", "USD", "BTC"], group = grpLiq,
      tooltip = "Consoante a exchange, o TradingView dá as liquidações em BTC ou em USD/USDT. Auto: deteta pelo tipo de volume do símbolo de liquidações e converte para USD (BTC x preço) quando é preciso.")
 liqMin = input.float(20000000.0, "Minimum liquidations (USD)", minval = 0, step = 1000000, group = grpLiq)
@@ -120,6 +120,8 @@ rearmPct = input.float(0.5, "Re-arm distance %", minval = 0.0, step = 0.05, grou
 slPct = input.float(1.0, "Stop loss % (beyond far edge of zone)", minval = 0.0, step = 0.1, group = grpStrat,
      tooltip = "O stop fica esta % para lá da extremidade OPOSTA da zona. 0 = sem stop loss.")
 tpPct = input.float(4.0, "Take profit %", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "0 = sem take profit (sai só por stop ou inversão).")
+showDiag = input.bool(true, "Diagnostic table", group = grpStrat,
+     tooltip = "Mostra no canto inferior direito o estado dos filtros na última vela: zonas armadas, sinais à espera, RSI e a maior vela de liquidações (longs/shorts) - para perceber porque é que uma trade não abriu.")
 tradeFrom = input.time(timestamp("2023-09-01T01:00:00"), "Trade from", group = grpStrat)
 tradeTo   = input.time(timestamp("2099-01-01T00:00:00"), "Trade until", group = grpStrat)
 
@@ -742,12 +744,14 @@ rsiCheck(bool lg) =>
 // (sem olhar para o futuro).
 // ---------------------------------------------------------------------------
 // Tickers de liquidações (formato da biblioteca oficial TradingView/Request):
-//   por exchange: "<EXCHANGE>:<CONTRATO>_LQSELL" (longs liquidados) / "_LQBUY" (shorts liquidados)
-//   agregado:     "CRYPTO:<COIN>_LQSELL" / "CRYPTO:<COIN>_LQBUY"
+//   por exchange: "<EXCHANGE>:<CONTRATO>_LQBUY" (longs liquidados) / "_LQSELL" (shorts liquidados)
+//   agregado:     "CRYPTO:<COIN>_LQBUY" / "CRYPTO:<COIN>_LQSELL"
+// Confirmado com dados reais: numa queda forte as barras grandes (verdes no
+// indicador Liquidations) são as LQBUY -> LQBUY = longs liquidados.
 // O valor liquidado está no campo VOLUME desses símbolos.
 lqCoin = str.replace(str.upper(syminfo.basecurrency), "XTVC", "")
-lqLongTicker  = liqSource == "Custom" ? liqLongSym  : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQSELL" : ticker.standard(syminfo.tickerid) + "_LQSELL"
-lqShortTicker = liqSource == "Custom" ? liqShortSym : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQBUY"  : ticker.standard(syminfo.tickerid) + "_LQBUY"
+lqLongTicker  = liqSource == "Custom" ? liqLongSym  : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQBUY"  : ticker.standard(syminfo.tickerid) + "_LQBUY"
+lqShortTicker = liqSource == "Custom" ? liqShortSym : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQSELL" : ticker.standard(syminfo.tickerid) + "_LQSELL"
 if useLiq and liqSource == "Custom" and (liqLongSym == "" or liqShortSym == "")
     runtime.error("Liquidations source = Custom: define os dois símbolos (ou escolhe 'Chart exchange' / 'Aggregated').")
 if useLiq and liqSource == "Chart exchange" and not str.endswith(syminfo.ticker, ".P") and syminfo.type != "futures"
@@ -844,6 +848,27 @@ liqCheck(bool lg, int mT) =>
                 nHit += 1
                 lbl := lbl + " " + str.tostring(array.get(lqMins, j)) + "m:" + str.tostring(best / 1000000, "#.#") + "M"
     [nOn > 0 and (liqCombine == "Any" ? nHit > 0 : nHit == nOn), lbl]
+
+// Maior vela de liquidações (atual ou N anteriores) entre os timeframes ligados.
+liqBestAll(bool lg, int mT) =>
+    bufT = lg ? lqLongT : lqShortT
+    bufV = lg ? lqLongV : lqShortV
+    float bestAll = 0.0
+    nb = array.size(bufT)
+    for j = 0 to 4
+        if array.get(lqOn, j)
+            tfMs = array.get(lqMins, j) * 60000
+            curB = int(math.floor(mT / tfMs))
+            sums = array.new<float>(liqLookback + 1, 0.0)
+            if nb > 0
+                for i = 0 to nb - 1
+                    t = array.get(bufT, i)
+                    if t <= mT
+                        k = curB - int(math.floor(t / tfMs))
+                        if k >= 0 and k <= liqLookback
+                            array.set(sums, k, array.get(sums, k) + array.get(bufV, i))
+            bestAll := math.max(bestAll, array.max(sums))
+    bestAll
 
 useConfirm = useRsi or useLiq
 
@@ -1157,6 +1182,29 @@ if array.size(newIds) > 0
 // Fecha tudo fora da janela de trading.
 if not inWindow and strategy.position_size != 0
     strategy.close_all(comment = "Fora da janela")
+
+// Tabela de diagnóstico (última vela).
+if barstate.islast and showDiag
+    var table dg = table.new(position.bottom_left, 2, 7, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+    lastT = array.size(m1T) > 0 ? array.last(m1T) : time
+    rsiTxt = ""
+    for i = 0 to 3
+        if array.get(rsOn, i)
+            rsiTxt := rsiTxt + str.tostring(array.get(rsMins, i)) + "m:" + str.tostring(array.get(curRsi, i), "#.0") + " "
+    table.cell(dg, 0, 0, "Posição", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 0, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat", text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 1, "Zonas armadas", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 1, str.tostring(array.size(pendBase)), text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 2, "Sinais à espera (zona tocada)", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 2, str.tostring(array.size(trgBase)), text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 3, "RSI", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 3, useRsi ? rsiTxt : "off", text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 4, "Liq. longs (maior vela)", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 4, useLiq ? str.tostring(liqBestAll(true, lastT) / 1000000, "#.##") + "M  " + lqLongTicker : "off", text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 5, "Liq. shorts (maior vela)", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 5, useLiq ? str.tostring(liqBestAll(false, lastT) / 1000000, "#.##") + "M  " + lqShortTicker : "off", text_color = color.white, text_size = size.small)
+    table.cell(dg, 0, 6, "Unidades liq.", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 6, useLiq ? (lqInBase ? "BTC -> USD" : "USD") + " (" + lqVolType + ")" : "off", text_color = color.white, text_size = size.small)
 
 // Aviso se o filtro de liquidações está ligado mas não chegam dados.
 if barstate.islast and useLiq and not lqGotData
