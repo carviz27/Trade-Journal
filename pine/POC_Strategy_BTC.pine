@@ -36,8 +36,8 @@ grpCalc   = "Calculation"
 // ---------------------------------------------------------------------------
 tradeDir = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = grpStrat,
      tooltip = "Both: long nos POCs abaixo do preço e short nos POCs acima. Long only / Short only: só coloca as ordens desse lado.")
-tradeNew    = input.bool(false, "Trade 'New' POCs", group = grpStrat,
-     tooltip = "POC do último período fechado (ainda não passou a naked). Costuma estar muito perto do preço.")
+tradeNew    = input.bool(true, "Trade 'New' POCs", group = grpStrat,
+     tooltip = "POC do último período fechado (linha cinzenta; ainda não passou a naked). Se estiver desligado, os New POCs também NÃO entram nas zonas.")
 tradeNaked  = input.bool(true, "Trade 'Naked' POCs", group = grpStrat,
      tooltip = "POCs ainda nunca tocados. Entrada no primeiro toque.")
 tradeTapped = input.bool(true, "Trade 'Tapped' POCs", group = grpStrat,
