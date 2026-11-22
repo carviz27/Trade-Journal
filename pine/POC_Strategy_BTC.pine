@@ -28,7 +28,7 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //   - Filtro de liquidações (ligado por defeito): só entra se as liquidações
 //     de LONGS (para longs) / SHORTS (para shorts) numa vela de 5m (ou do
 //     timeframe escolhido) - a atual ou uma das 3 anteriores - forem >= 20M USD. Dados = indicador Liquidations do
-//     TradingView (tickers <CONTRATO>_LQBUY = longs / _LQSELL = shorts, campo volume), da
+//     TradingView (tickers <CONTRATO>_LQSELL = longs / _LQBUY = shorts, campo volume), da
 //     exchange do gráfico ou agregados. Nesse modo a
 //     entrada é a mercado na barra seguinte do gráfico (no gráfico de 1m =
 //     minuto seguinte; em 15m pode chegar até 15 min de atraso).
@@ -93,12 +93,12 @@ rsiWindow = input.int(3, "Minutes after touch to wait for RSI", minval = 0, maxv
 grpLiq = "Liquidations filter"
 useLiq = input.bool(true, "Require liquidations", group = grpLiq,
      tooltip = "ON: só entra se as liquidações dos últimos X minutos forem >= ao mínimo - LONG liquidations para longs, SHORT liquidations para shorts. Combina com o filtro RSI (os dois têm de confirmar no mesmo minuto).")
-liqSource = input.string("Chart exchange", "Liquidations source", options = ["Chart exchange", "Aggregated (all exchanges)", "Custom"], group = grpLiq,
-     tooltip = "Chart exchange: liquidações da exchange/contrato do gráfico (ex.: BYBIT:BTCUSDT.P -> BYBIT:BTCUSDT.P_LQBUY / _LQSELL). Aggregated: todas as exchanges suportadas (CRYPTO:BTC_LQBUY / _LQSELL), igual ao indicador 'Liquidations' do TradingView em modo agregado. Custom: escreves os símbolos abaixo. Os dados são os mesmos do indicador Liquidations do TradingView. O gráfico tem de ser um contrato perpétuo/futuro (.P), não spot, para 'Chart exchange'.")
+liqSource = input.string("Aggregated (all exchanges)", "Liquidations source", options = ["Chart exchange", "Aggregated (all exchanges)", "Custom"], group = grpLiq,
+     tooltip = "Chart exchange: liquidações da exchange/contrato do gráfico (ex.: BYBIT:BTCUSDT.P -> BYBIT:BTCUSDT.P_LQSELL / _LQBUY). Aggregated: todas as exchanges suportadas (CRYPTO:BTC_LQSELL / _LQBUY), igual ao indicador 'Liquidations' do TradingView em modo agregado. Custom: escreves os símbolos abaixo. Os dados são os mesmos do indicador Liquidations do TradingView. O gráfico tem de ser um contrato perpétuo/futuro (.P), não spot, para 'Chart exchange'.")
 liqLongSym  = input.symbol("", "Custom long liquidations symbol", group = grpLiq, active = liqSource == "Custom",
-     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQBUY (barras verdes do indicador Liquidations = longs liquidados).")
+     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQSELL (longs liquidados = venda forçada).")
 liqShortSym = input.symbol("", "Custom short liquidations symbol", group = grpLiq, active = liqSource == "Custom",
-     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQSELL (barras vermelhas do indicador Liquidations = shorts liquidados).")
+     tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQBUY (shorts liquidados = compra forçada).")
 liqUnits = input.string("Auto", "Values are in", options = ["Auto", "USD", "BTC"], group = grpLiq,
      tooltip = "Consoante a exchange, o TradingView dá as liquidações em BTC ou em USD/USDT. Auto: deteta pelo tipo de volume do símbolo de liquidações e converte para USD (BTC x preço) quando é preciso.")
 liqMin = input.float(20000000.0, "Minimum liquidations (USD)", minval = 0, step = 1000000, group = grpLiq)
@@ -744,14 +744,14 @@ rsiCheck(bool lg) =>
 // (sem olhar para o futuro).
 // ---------------------------------------------------------------------------
 // Tickers de liquidações (formato da biblioteca oficial TradingView/Request):
-//   por exchange: "<EXCHANGE>:<CONTRATO>_LQBUY" (longs liquidados) / "_LQSELL" (shorts liquidados)
-//   agregado:     "CRYPTO:<COIN>_LQBUY" / "CRYPTO:<COIN>_LQSELL"
-// Confirmado com dados reais: numa queda forte as barras grandes (verdes no
-// indicador Liquidations) são as LQBUY -> LQBUY = longs liquidados.
+//   por exchange: "<EXCHANGE>:<CONTRATO>_LQSELL" (longs liquidados) / "_LQBUY" (shorts liquidados)
+//   agregado:     "CRYPTO:<COIN>_LQSELL" / "CRYPTO:<COIN>_LQBUY"
+// Confirmado com dados reais (Bybit, queda forte): LQSELL 3.64M vs LQBUY
+// 0.06M -> LQSELL = longs liquidados (venda forçada).
 // O valor liquidado está no campo VOLUME desses símbolos.
 lqCoin = str.replace(str.upper(syminfo.basecurrency), "XTVC", "")
-lqLongTicker  = liqSource == "Custom" ? liqLongSym  : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQBUY"  : ticker.standard(syminfo.tickerid) + "_LQBUY"
-lqShortTicker = liqSource == "Custom" ? liqShortSym : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQSELL" : ticker.standard(syminfo.tickerid) + "_LQSELL"
+lqLongTicker  = liqSource == "Custom" ? liqLongSym  : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQSELL" : ticker.standard(syminfo.tickerid) + "_LQSELL"
+lqShortTicker = liqSource == "Custom" ? liqShortSym : liqSource == "Aggregated (all exchanges)" ? "CRYPTO:" + lqCoin + "_LQBUY"  : ticker.standard(syminfo.tickerid) + "_LQBUY"
 if useLiq and liqSource == "Custom" and (liqLongSym == "" or liqShortSym == "")
     runtime.error("Liquidations source = Custom: define os dois símbolos (ou escolhe 'Chart exchange' / 'Aggregated').")
 if useLiq and liqSource == "Chart exchange" and not str.endswith(syminfo.ticker, ".P") and syminfo.type != "futures"
