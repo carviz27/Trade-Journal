@@ -21,9 +21,10 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //     por Take Profit ou Stop Loss. Todas as ordens pendentes estão no mesmo
 //     grupo OCA: quando uma é executada, as outras são canceladas logo (mesmo
 //     dentro da mesma vela). Não há inversões de posição.
-//   - Filtro RSI (ligado por defeito; timeframe do RSI 1/5/15/30 min): só
-//     entra quando o preço toca a zona e o RSI(14) está < 30 (long) ou > 70
-//     (short), dentro de uma janela de N minutos após o toque. Nesse modo a
+//   - Filtro RSI (ligado por defeito; um ou vários timeframes 1/5/15/30 min,
+//     combinados com Any/All): só entra quando o preço toca a zona e o
+//     RSI(14) está < 30 (long) ou > 70 (short), dentro de uma janela de N
+//     minutos após o toque. Nesse modo a
 //     entrada é a mercado na barra seguinte do gráfico (no gráfico de 1m =
 //     minuto seguinte; em 15m pode chegar até 15 min de atraso).
 //   - Saída: Stop Loss (para lá da zona) e Take Profit %.
@@ -70,9 +71,14 @@ basePct = input.float(5.0, "Base size (% equity)", minval = 0.1, step = 0.5, gro
 showZones = input.bool(true, "Show zones", group = grpZone)
 grpRsi = "RSI filter"
 useRsi = input.bool(true, "Require RSI", group = grpRsi,
-     tooltip = "ON: só entra quando o preço toca a zona E o RSI (do 'RSI timeframe') está oversold (long) ou overbought (short). A entrada é a mercado, na abertura da barra seguinte do gráfico - quanto menor o gráfico, mais precisa. OFF: ordens limit nas zonas, sem filtro.")
-rsiTF  = input.string("1", "RSI timeframe", options = ["1", "5", "15", "30"], group = grpRsi,
-     tooltip = "Timeframe do RSI, em minutos. Se for MENOR que o gráfico, usa as velas desse timeframe dentro de cada vela do gráfico (RSI fechado). Se for IGUAL, usa o RSI do próprio gráfico. Se for MAIOR, usa o RSI em formação (o valor que verias ao vivo nesse timeframe).")
+     tooltip = "ON: só entra quando o preço toca a zona E o RSI (dos timeframes ligados) está oversold (long) ou overbought (short). A entrada é a mercado, na abertura da barra seguinte do gráfico - quanto menor o gráfico, mais precisa. OFF: ordens limit nas zonas, sem filtro.")
+rsi1On  = input.bool(true,  "1m",  group = grpRsi, inline = "rsiTF")
+rsi5On  = input.bool(false, "5m",  group = grpRsi, inline = "rsiTF")
+rsi15On = input.bool(false, "15m", group = grpRsi, inline = "rsiTF")
+rsi30On = input.bool(false, "30m", group = grpRsi, inline = "rsiTF",
+     tooltip = "Timeframes do RSI a usar (podes ligar vários). O RSI de cada um é avaliado minuto a minuto, em formação (o valor que verias ao vivo nesse timeframe).")
+rsiCombine = input.string("Any", "Combine timeframes", options = ["Any", "All"], group = grpRsi,
+     tooltip = "Any: basta UM dos timeframes ligados estar oversold/overbought. All: TODOS os ligados têm de estar ao mesmo tempo.")
 rsiLen = input.int(14, "RSI length", minval = 2, group = grpRsi)
 rsiOB  = input.float(70, "Overbought (shorts acima de)", group = grpRsi)
 rsiOS  = input.float(30, "Oversold (longs abaixo de)", group = grpRsi)
@@ -625,62 +631,95 @@ var array<string> trgMem   = array.new<string>()
 var array<int>    trgCnt   = array.new<int>()
 var array<int>    trgExp   = array.new<int>()
 
-// Passos de avaliação do filtro RSI dentro de cada barra do gráfico:
-//   - RSI TF < gráfico: velas do RSI TF dentro da barra (RSI calculado no
-//     contexto desse timeframe, valor fechado de cada vela).
-//   - RSI TF = gráfico: a própria barra, com ta.rsi do gráfico.
-//   - RSI TF > gráfico: a própria barra, com o RSI do TF maior EM FORMAÇÃO
-//     (RMA dos ganhos/perdas até à última vela fechada do TF maior + a
-//     variação atual), igual ao que se vê ao vivo nesse timeframe.
+// Filtro RSI multi-timeframe. Os passos de avaliação são velas de 1 minuto
+// (as da barra do gráfico via request.security_lower_tf, ou a própria barra
+// se o gráfico for de 1m ou menos). Para cada timeframe ligado (1/5/15/30m)
+// mantém-se um RSI próprio, calculado à mão a partir desses closes de 1m:
+// RMA (Wilder, igual ao ta.rsi) dos ganhos/perdas até à última vela FECHADA
+// desse timeframe + a variação até ao minuto atual = RSI em formação, o mesmo
+// que se veria ao vivo nesse timeframe.
 chartSec = timeframe.in_seconds(timeframe.period)
-rsiSec   = timeframe.in_seconds(rsiTF)
+if useRsi and not (rsi1On or rsi5On or rsi15On or rsi30On)
+    runtime.error("Liga pelo menos um timeframe do RSI (1m/5m/15m/30m) ou desliga 'Require RSI'.")
 
-chartRsi = ta.rsi(close, rsiLen)
+rsMins = array.from(1, 5, 15, 30)
+rsOn   = array.from(rsi1On, rsi5On, rsi15On, rsi30On)
+var array<float> rsPrev = array.new<float>(4, na)
+var array<float> rsLast = array.new<float>(4, na)
+var array<float> rsAvgG = array.new<float>(4, na)
+var array<float> rsAvgL = array.new<float>(4, na)
+var array<float> rsSumG = array.new<float>(4, 0.0)
+var array<float> rsSumL = array.new<float>(4, 0.0)
+var array<int>   rsN    = array.new<int>(4, 0)
+var array<int>   rsCur  = array.new<int>(4, -1)
+curRsi = array.new<float>(4, na)
 
-var float htfPrevClose = na
-var float htfAvgG = na
-var float htfAvgL = na
-var float htfSumG = 0.0
-var float htfSumL = 0.0
-var int   htfN = 0
-if rsiSec > chartSec and timeframe.change(rsiTF) and not na(close[1])
-    // A barra anterior do gráfico fechou uma vela do TF maior com close[1].
-    if not na(htfPrevClose)
-        ch = close[1] - htfPrevClose
-        g = math.max(ch, 0)
-        l = math.max(-ch, 0)
-        if htfN < rsiLen
-            htfSumG += g
-            htfSumL += l
-            htfN += 1
-            if htfN == rsiLen
-                htfAvgG := htfSumG / rsiLen
-                htfAvgL := htfSumL / rsiLen
-        else
-            htfAvgG := (htfAvgG * (rsiLen - 1) + g) / rsiLen
-            htfAvgL := (htfAvgL * (rsiLen - 1) + l) / rsiLen
-    htfPrevClose := close[1]
-float devRsi = na
-if not na(htfAvgG) and not na(htfPrevClose)
-    chNow = close - htfPrevClose
-    dG = (htfAvgG * (rsiLen - 1) + math.max(chNow, 0)) / rsiLen
-    dL = (htfAvgL * (rsiLen - 1) + math.max(-chNow, 0)) / rsiLen
-    devRsi := dL == 0 ? 100.0 : dG == 0 ? 0.0 : 100 - 100 / (1 + dG / dL)
+// Alimenta os RSIs com um close de 1m (t = hora de abertura desse minuto).
+rsiFeed(int t, float c) =>
+    for i = 0 to 3
+        if array.get(rsOn, i)
+            bid = int(math.floor(t / (array.get(rsMins, i) * 60000.0)))
+            cur = array.get(rsCur, i)
+            if cur != bid
+                if cur != -1
+                    lastC = array.get(rsLast, i)
+                    prev  = array.get(rsPrev, i)
+                    if not na(prev)
+                        ch = lastC - prev
+                        g = math.max(ch, 0)
+                        l = math.max(-ch, 0)
+                        n = array.get(rsN, i)
+                        if n < rsiLen
+                            array.set(rsSumG, i, array.get(rsSumG, i) + g)
+                            array.set(rsSumL, i, array.get(rsSumL, i) + l)
+                            array.set(rsN, i, n + 1)
+                            if n + 1 == rsiLen
+                                array.set(rsAvgG, i, array.get(rsSumG, i) / rsiLen)
+                                array.set(rsAvgL, i, array.get(rsSumL, i) / rsiLen)
+                        else
+                            array.set(rsAvgG, i, (array.get(rsAvgG, i) * (rsiLen - 1) + g) / rsiLen)
+                            array.set(rsAvgL, i, (array.get(rsAvgL, i) * (rsiLen - 1) + l) / rsiLen)
+                    array.set(rsPrev, i, lastC)
+                array.set(rsCur, i, bid)
+            array.set(rsLast, i, c)
+            prev2 = array.get(rsPrev, i)
+            aG = array.get(rsAvgG, i)
+            float r = na
+            if not na(prev2) and not na(aG)
+                chNow = c - prev2
+                dG = (aG * (rsiLen - 1) + math.max(chNow, 0)) / rsiLen
+                dL = (array.get(rsAvgL, i) * (rsiLen - 1) + math.max(-chNow, 0)) / rsiLen
+                r := dL == 0 ? 100.0 : dG == 0 ? 0.0 : 100 - 100 / (1 + dG / dL)
+            array.set(curRsi, i, r)
+
+// RSI confirma a direção? Devolve [ok, texto com os RSIs que confirmaram].
+rsiCheck(bool lg) =>
+    int nOn = 0
+    int nHit = 0
+    string lbl = ""
+    for i = 0 to 3
+        if array.get(rsOn, i)
+            nOn += 1
+            r = array.get(curRsi, i)
+            if not na(r) and (lg ? r < rsiOS : r > rsiOB)
+                nHit += 1
+                lbl := lbl + " " + str.tostring(array.get(rsMins, i)) + "m:" + str.tostring(r, "#")
+    [nOn > 0 and (rsiCombine == "Any" ? nHit > 0 : nHit == nOn), lbl]
 
 m1H = array.new<float>()
 m1L = array.new<float>()
-m1R = array.new<float>()
+m1C = array.new<float>()
 m1T = array.new<int>()
 if useRsi
-    if rsiSec < chartSec
-        m1H := request.security_lower_tf(syminfo.tickerid, rsiTF, high)
-        m1L := request.security_lower_tf(syminfo.tickerid, rsiTF, low)
-        m1R := request.security_lower_tf(syminfo.tickerid, rsiTF, ta.rsi(close, rsiLen))
-        m1T := request.security_lower_tf(syminfo.tickerid, rsiTF, time)
+    if chartSec > 60
+        m1H := request.security_lower_tf(syminfo.tickerid, "1", high)
+        m1L := request.security_lower_tf(syminfo.tickerid, "1", low)
+        m1C := request.security_lower_tf(syminfo.tickerid, "1", close)
+        m1T := request.security_lower_tf(syminfo.tickerid, "1", time)
     else
         array.push(m1H, high)
         array.push(m1L, low)
-        array.push(m1R, rsiSec == chartSec ? chartRsi : devRsi)
+        array.push(m1C, close)
         array.push(m1T, time)
 
 lockKey(string k, float p) =>
@@ -744,7 +783,7 @@ if useRsi
         for k = 0 to nMin - 1
             mH = array.get(m1H, k)
             mL = array.get(m1L, k)
-            mR = array.get(m1R, k)
+            rsiFeed(array.get(m1T, k), array.get(m1C, k))
             mT = array.get(m1T, k)
             // Toques nas zonas armadas -> novos sinais.
             if not enteredNow and array.size(pendBase) > 0
@@ -776,11 +815,11 @@ if useRsi
                         array.remove(trgCnt, i)
                         array.remove(trgExp, i)
             // Entrada quando o RSI deste passo confirma.
-            if not enteredNow and strategy.position_size == 0 and inWindow and not na(mR) and array.size(trgBase) > 0
+            if not enteredNow and strategy.position_size == 0 and inWindow and array.size(trgBase) > 0
                 for i = array.size(trgBase) - 1 to 0
                     lg = array.get(trgLong, i)
                     sl = array.get(trgSL, i)
-                    rsiOk = lg ? mR < rsiOS : mR > rsiOB
+                    [rsiOk, rsiLbl] = rsiCheck(lg)
                     slOk = na(sl) or (lg ? sl < close : sl > close)
                     if not enteredNow and rsiOk and slOk
                         b = array.get(trgBase, i)
@@ -789,7 +828,7 @@ if useRsi
                         float tp = tpPct > 0 ? (lg ? close * (1 + tpPct / 100) : close * (1 - tpPct / 100)) : na
                         mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
                         strategy.entry(eid, lg ? strategy.long : strategy.short, qty = strategy.equity * basePct / 100 * mult / close,
-                             comment = (lg ? "L " : "S ") + eid + " RSI " + str.tostring(mR, "#.0"))
+                             comment = (lg ? "L " : "S ") + eid + " RSI" + rsiLbl)
                         strategy.exit("X|" + eid, from_entry = eid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
                         map.put(filled, eid, true)
                         map.put(fillCnt, b, (map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0) + 1)
