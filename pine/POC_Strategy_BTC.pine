@@ -21,6 +21,10 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //     por Take Profit ou Stop Loss. Todas as ordens pendentes estão no mesmo
 //     grupo OCA: quando uma é executada, as outras são canceladas logo (mesmo
 //     dentro da mesma vela). Não há inversões de posição.
+//   - Filtro RSI 1m (ligado por defeito, exige gráfico de 1 minuto): só
+//     entra quando o preço toca a zona e o RSI(14) de 1m está < 30 (long) ou
+//     > 70 (short), dentro de uma janela de N minutos após o toque. Nesse
+//     modo a entrada é a mercado no minuto seguinte, não por ordem limit.
 //   - Saída: Stop Loss (para lá da zona) e Take Profit %.
 //
 // Só funciona em BTC (BTCUSDT, BTCUSD, BTCUSDT.P, XBTUSD, ...).
@@ -63,6 +67,15 @@ sizeByCount = input.bool(false, "Scale size by POC count", group = grpZone,
 maxSizeMult = input.int(3, "Max size multiplier", minval = 1, maxval = 10, group = grpZone)
 basePct = input.float(5.0, "Base size (% equity)", minval = 0.1, step = 0.5, group = grpZone)
 showZones = input.bool(true, "Show zones", group = grpZone)
+grpRsi = "RSI filter (1 min)"
+useRsi = input.bool(true, "Require RSI 1m", group = grpRsi,
+     tooltip = "ON: só entra quando o preço toca a zona E o RSI de 1 minuto está oversold (long) ou overbought (short). A entrada é a mercado, na abertura do minuto seguinte. Exige gráfico de 1 minuto. OFF: ordens limit nas zonas, sem filtro.")
+rsiLen = input.int(14, "RSI length", minval = 2, group = grpRsi)
+rsiOB  = input.float(70, "Overbought (shorts acima de)", group = grpRsi)
+rsiOS  = input.float(30, "Oversold (longs abaixo de)", group = grpRsi)
+rsiWindow = input.int(3, "Minutes after touch to wait for RSI", minval = 0, maxval = 120, group = grpRsi,
+     tooltip = "Depois de o preço tocar a zona, durante quantos minutos o sinal fica à espera de o RSI chegar ao extremo. 0 = o RSI tem de estar no extremo no próprio minuto do toque. O sinal é cancelado se o preço chegar ao stop loss da zona.")
+
 reuseTouched = input.bool(true, "Re-use touched POCs", group = grpStrat,
      tooltip = "ON: um POC/zona já negociado volta a poder ser usado (mesmo no próprio dia) depois de o preço se afastar dele pelo menos 'Re-arm distance %'. OFF: cada POC só é negociado uma vez.")
 rearmPct = input.float(0.5, "Re-arm distance %", minval = 0.0, step = 0.05, group = grpStrat,
@@ -132,6 +145,8 @@ waitForClose = input.bool(false, "Wait for timeframe closes", group = grpCalc)
 isBTC = syminfo.basecurrency == "BTC" or syminfo.basecurrency == "XBT"
 if slPct == 0 and tpPct == 0
     runtime.error("Define pelo menos Stop loss % ou Take profit %: só se abre uma nova trade depois de a atual sair por TP ou SL.")
+if useRsi and timeframe.period != "1"
+    runtime.error("Com 'Require RSI 1m' ligado, a estratégia tem de correr no gráfico de 1 minuto (atual: " + timeframe.period + ").")
 if not isBTC
     runtime.error("Esta estratégia só funciona em BTC. Símbolo atual: " + syminfo.tickerid)
 
@@ -597,6 +612,19 @@ var array<string> pendIds  = array.new<string>()
 var array<string> pendBase = array.new<string>()
 var array<float>  pendPx   = array.new<float>()
 var array<string> pendMem  = array.new<string>()
+var array<bool>   pendLong = array.new<bool>()
+var array<float>  pendSL   = array.new<float>()
+var array<int>    pendCnt  = array.new<int>()
+// Sinais à espera do RSI (zona tocada, RSI ainda não no extremo).
+var array<string> trgBase  = array.new<string>()
+var array<bool>   trgLong  = array.new<bool>()
+var array<float>  trgEntry = array.new<float>()
+var array<float>  trgSL    = array.new<float>()
+var array<string> trgMem   = array.new<string>()
+var array<int>    trgCnt   = array.new<int>()
+var array<int>    trgExp   = array.new<int>()
+
+rsi1m = ta.rsi(close, rsiLen)
 
 lockKey(string k, float p) =>
     if not map.contains(traded, k)
@@ -644,6 +672,71 @@ if reuseTouched and array.size(lockKeys) > 0
             array.remove(lockKeys, i)
             array.remove(lockPx, i)
             needSel := true
+
+// 1c) Filtro RSI: as zonas "armadas" na barra anterior que o preço tocou
+//     nesta vela passam a sinais à espera do RSI; quando o RSI de 1m chega
+//     ao extremo (e não há posição), entra a mercado.
+enteredNow = false
+if useRsi
+    if array.size(pendBase) > 0
+        for i = 0 to array.size(pendBase) - 1
+            b  = array.get(pendBase, i)
+            lg = array.get(pendLong, i)
+            ep = array.get(pendPx, i)
+            touched = lg ? low <= ep : high >= ep
+            if touched and not array.includes(trgBase, b)
+                array.push(trgBase, b)
+                array.push(trgLong, lg)
+                array.push(trgEntry, ep)
+                array.push(trgSL, array.get(pendSL, i))
+                array.push(trgMem, array.get(pendMem, i))
+                array.push(trgCnt, array.get(pendCnt, i))
+                array.push(trgExp, bar_index + rsiWindow)
+    // Expira sinais antigos ou cuja zona foi rompida até ao stop.
+    if array.size(trgBase) > 0
+        for i = array.size(trgBase) - 1 to 0
+            lg = array.get(trgLong, i)
+            sl = array.get(trgSL, i)
+            broken = not na(sl) and (lg ? low <= sl : high >= sl)
+            if bar_index > array.get(trgExp, i) or broken or map.contains(traded, array.get(trgBase, i))
+                array.remove(trgBase, i)
+                array.remove(trgLong, i)
+                array.remove(trgEntry, i)
+                array.remove(trgSL, i)
+                array.remove(trgMem, i)
+                array.remove(trgCnt, i)
+                array.remove(trgExp, i)
+    // Entrada.
+    if strategy.position_size == 0 and inWindow and array.size(trgBase) > 0
+        for i = array.size(trgBase) - 1 to 0
+            lg = array.get(trgLong, i)
+            sl = array.get(trgSL, i)
+            rsiOk = lg ? rsi1m < rsiOS : rsi1m > rsiOB
+            slOk = na(sl) or (lg ? sl < close : sl > close)
+            if not enteredNow and rsiOk and slOk
+                b = array.get(trgBase, i)
+                cnt = array.get(trgCnt, i)
+                eid = b + "#" + str.tostring(map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0)
+                float tp = tpPct > 0 ? (lg ? close * (1 + tpPct / 100) : close * (1 - tpPct / 100)) : na
+                mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
+                strategy.entry(eid, lg ? strategy.long : strategy.short, qty = strategy.equity * basePct / 100 * mult / close,
+                     comment = (lg ? "L " : "S ") + eid + " RSI " + str.tostring(rsi1m, "#.0"))
+                strategy.exit("X|" + eid, from_entry = eid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+                map.put(filled, eid, true)
+                map.put(fillCnt, b, (map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0) + 1)
+                lockKey(b, array.get(trgEntry, i))
+                for m in str.split(array.get(trgMem, i), ";")
+                    lockKey(m, str.tonumber(str.substring(m, 2)))
+                needSel := true
+                enteredNow := true
+        if enteredNow
+            array.clear(trgBase)
+            array.clear(trgLong)
+            array.clear(trgEntry)
+            array.clear(trgSL)
+            array.clear(trgMem)
+            array.clear(trgCnt)
+            array.clear(trgExp)
 
 // 2) POCs candidatos: em cada timeframe junta TODOS os POCs (New + Naked +
 //    Tapped, sem distinção), tira os preços já usados e fica com os N mais
@@ -728,7 +821,7 @@ if nCand > 0
     array.push(zMem, curMem)
 
 // 4) Uma ordem por zona elegível - só quando NÃO há posição aberta.
-flat = strategy.position_size == 0
+flat = strategy.position_size == 0 and not enteredNow
 newIds = array.new<string>()
 newBase = array.new<string>()
 newPx  = array.new<float>()
@@ -737,6 +830,7 @@ newLong = array.new<bool>()
 newSL  = array.new<float>()
 newTP  = array.new<float>()
 newQty = array.new<float>()
+newCnt = array.new<int>()
 nZones = array.size(zLo)
 if nZones > 0 and flat
     for z = 0 to nZones - 1
@@ -762,13 +856,14 @@ if nZones > 0 and flat
                 array.push(newSL, sl)
                 array.push(newTP, tp)
                 array.push(newQty, qty)
+                array.push(newCnt, cnt)
 
 // 5) Cancela ordens de zonas que deixaram de existir (o SL/TP de entradas já
 //    executadas mantém-se).
-if array.size(pendIds) > 0
+if not useRsi and array.size(pendIds) > 0
     for i = 0 to array.size(pendIds) - 1
         oid = array.get(pendIds, i)
-        if not array.includes(newIds, oid)
+        if not array.includes(newIds, oid) and not map.contains(filled, oid)
             strategy.cancel(oid)
             if not map.contains(filled, oid)
                 strategy.cancel("X|" + oid)
@@ -780,6 +875,9 @@ array.clear(pendIds)
 array.clear(pendBase)
 array.clear(pendPx)
 array.clear(pendMem)
+array.clear(pendLong)
+array.clear(pendSL)
+array.clear(pendCnt)
 if array.size(newIds) > 0
     for i = 0 to array.size(newIds) - 1
         oid = array.get(newIds, i)
@@ -787,11 +885,17 @@ if array.size(newIds) > 0
         isLong = array.get(newLong, i)
         sl = array.get(newSL, i)
         tp = array.get(newTP, i)
-        strategy.entry(oid, isLong ? strategy.long : strategy.short, qty = array.get(newQty, i), limit = p,
-             oca_name = ocaName, oca_type = strategy.oca.cancel,
-             comment = (isLong ? "L " : "S ") + oid)
-        if not na(sl) or not na(tp)
-            strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+        // Com o filtro RSI as zonas ficam só "armadas" (sem ordem limit): a
+        // entrada é feita no passo 1c, quando o RSI confirma.
+        if not useRsi
+            strategy.entry(oid, isLong ? strategy.long : strategy.short, qty = array.get(newQty, i), limit = p,
+                 oca_name = ocaName, oca_type = strategy.oca.cancel,
+                 comment = (isLong ? "L " : "S ") + oid)
+            if not na(sl) or not na(tp)
+                strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+        array.push(pendLong, isLong)
+        array.push(pendSL, sl)
+        array.push(pendCnt, array.get(newCnt, i))
         array.push(pendIds, oid)
         array.push(pendBase, array.get(newBase, i))
         array.push(pendPx, p)
