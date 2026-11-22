@@ -500,6 +500,7 @@ pocEngineStep() =>
              newTF("1M", newShow1M, nakedShow1M, tappedShow1M, 2, true)))
     pT = time[1]
     pC = close[1]
+    bool changed = false
     // Primeira vela de 1h de um novo dia (calcTF) -> fecha o dia anterior.
     if timeframe.change(calcTF) and array.size(e.todayH) > 0
         dLo = array.min(e.todayL)
@@ -508,23 +509,40 @@ pocEngineStep() =>
         e.lastDailyClose := pC
         e.dayCount += 1
         e.dayClose := pC
+        changed := true
     array.push(e.todayH, high)
     array.push(e.todayL, low)
     array.push(e.todayV, volume)
     // "Update on every tick": toques verificados vela de 1h a vela de 1h.
-    if nakedLive
+    if nakedLive or tappedLive
+        int before = 0
         for st in e.tfs
-            processNakedTaps(st, high, low, close, pC)
-    if tappedLive
+            before += array.size(st.nakedPrices) * 1000 + array.size(st.tappedPrices)
+        if nakedLive
+            for st in e.tfs
+                processNakedTaps(st, high, low, close, pC)
+        if tappedLive
+            for st in e.tfs
+                processTappedTaps(st, high, low, close, pC)
+        int after = 0
         for st in e.tfs
-            processTappedTaps(st, high, low, close, pC)
-    PocOut out = PocOut.new(tfs = array.new<TFOut>(), dayCount = e.dayCount, dayClose = e.dayClose)
-    for st in e.tfs
-        array.push(out.tfs, TFOut.new(st.newPrice, st.hasNew,
-             selectClosest(st.nakedPrices, POC_OUT_N, close), selectClosest(st.tappedPrices, POC_OUT_N, close)))
+            after += array.size(st.nakedPrices) * 1000 + array.size(st.tappedPrices)
+        if after != before
+            changed := true
+    // Só envia o objeto quando os POCs mudam (ou na última vela). Enviar em
+    // todas as velas fazia o TradingView guardar uma cópia por vela do
+    // gráfico -> "Memory limits exceeded" (RE10139) em 1m/5m.
+    PocOut out = na
+    if changed or barstate.islast
+        out := PocOut.new(tfs = array.new<TFOut>(), dayCount = e.dayCount, dayClose = e.dayClose)
+        for st in e.tfs
+            array.push(out.tfs, TFOut.new(st.newPrice, st.hasNew,
+                 selectClosest(st.nakedPrices, POC_OUT_N, close), selectClosest(st.tappedPrices, POC_OUT_N, close)))
     out
 
-PocOut pocOut = request.security(targetSymbol, "60", pocEngineStep(), lookahead = barmerge.lookahead_off)
+// gaps_on: o gráfico só recebe o objeto na vela em que ele chega (não é
+// repetido nas ~60 velas de 1m de cada hora). Entre envios mantém-se o último.
+PocOut pocOut = request.security(targetSymbol, "60", pocEngineStep(), gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off)
 
 // Copia o resultado para o estado do gráfico (seleção, desenho e trading).
 var int lastDayCount = -1
