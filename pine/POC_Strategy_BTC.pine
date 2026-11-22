@@ -1,5 +1,5 @@
 //@version=6
-strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, max_lines_count = 500,
+strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, max_lines_count = 500, max_boxes_count = 200,
      initial_capital = 10000, currency = currency.USD,
      default_qty_type = strategy.percent_of_equity, default_qty_value = 5,
      pyramiding = 20, commission_type = strategy.commission.percent, commission_value = 0.05,
@@ -9,11 +9,13 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 // Estratégia baseada no indicador "POC Multi-Timeframe (1D-1M)".
 //
 // Regra:
-//   - Cada POC ABAIXO do preço atual  -> ordem LIMIT de COMPRA (long) no POC.
-//   - Cada POC ACIMA  do preço atual  -> ordem LIMIT de VENDA  (short) no POC.
-//   - Cada nível só é negociado UMA vez por tipo (New / Naked / Tapped): depois
-//     de o preço lhe tocar, a ordem desse nível não volta a ser colocada.
-//   - Saída: Stop Loss % e Take Profit % por entrada (0 = desligado). Como o
+//   - POCs próximos agrupam-se em ZONAS (ver secção "POC zones").
+//   - Zona ABAIXO do preço atual -> ordem LIMIT de COMPRA (long).
+//   - Zona ACIMA  do preço atual -> ordem LIMIT de VENDA  (short).
+//   - Preço dentro de uma zona -> essa zona não gera ordens.
+//   - Cada zona/POC só é negociado UMA vez: depois de tocado, não volta a
+//     receber ordem (um naked pode voltar quando passa a tapped).
+//   - Saída: Stop Loss (para lá da zona) e Take Profit %. Como o
 //     TradingView não deixa ter long e short ao mesmo tempo, uma entrada no
 //     sentido contrário fecha (inverte) a posição atual.
 //
@@ -42,7 +44,22 @@ tradeTapped = input.bool(true, "Trade 'Tapped' POCs", group = grpStrat,
      tooltip = "POCs já tocados uma vez (mas ainda não removidos). Entrada no toque seguinte.")
 nTradeLevels = input.int(3, "Naked levels per timeframe", minval = 1, maxval = 20, group = grpStrat,
      tooltip = "Quantos POCs naked (os mais próximos do preço) de cada timeframe recebem ordens. Os timeframes/tipos desligados nos grupos de baixo não são negociados.")
-slPct = input.float(2.0, "Stop loss %", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "0 = sem stop loss.")
+grpZone = "POC zones (clusters)"
+clusterPct = input.float(0.4, "Cluster distance %", minval = 0.0, step = 0.05, group = grpZone,
+     tooltip = "POCs a menos desta distância (%) do POC vizinho juntam-se na mesma zona. 0 = cada POC é uma zona sozinho (comportamento antigo).")
+maxZonePct = input.float(1.5, "Max zone width %", minval = 0.0, step = 0.1, group = grpZone,
+     tooltip = "Largura máxima de uma zona, para os POCs não se encadearem numa zona gigante.")
+minPocsZone = input.int(1, "Min POCs per zone", minval = 1, maxval = 20, group = grpZone,
+     tooltip = "1 = negoceia também POCs isolados. 2+ = só negoceia zonas de confluência com pelo menos N POCs.")
+entryMode = input.string("Near edge", "Entry at", options = ["Near edge", "Zone middle"], group = grpZone,
+     tooltip = "Near edge: entra no primeiro POC da zona que o preço toca. Zone middle: entra no meio da zona.")
+sizeByCount = input.bool(false, "Scale size by POC count", group = grpZone,
+     tooltip = "Tamanho = base % x nº de POCs da zona (até ao multiplicador máximo).")
+maxSizeMult = input.int(3, "Max size multiplier", minval = 1, maxval = 10, group = grpZone)
+basePct = input.float(5.0, "Base size (% equity)", minval = 0.1, step = 0.5, group = grpZone)
+showZones = input.bool(true, "Show zones", group = grpZone)
+slPct = input.float(1.0, "Stop loss % (beyond far edge of zone)", minval = 0.0, step = 0.1, group = grpStrat,
+     tooltip = "O stop fica esta % para lá da extremidade OPOSTA da zona. 0 = sem stop loss.")
 tpPct = input.float(4.0, "Take profit %", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "0 = sem take profit (sai só por stop ou inversão).")
 tradeFrom = input.time(timestamp("2023-09-01T01:00:00"), "Trade from", group = grpStrat)
 tradeTo   = input.time(timestamp("2099-01-01T00:00:00"), "Trade until", group = grpStrat)
@@ -540,36 +557,53 @@ if hadNewDay
         selTp1M := updateTappedSel(st1M, dC)
 
 // ============================================================================
-// ESTRATÉGIA: ordens limit em cada POC
+// ESTRATÉGIA: zonas de POCs (clusters) com ordens limit
 // ============================================================================
-// traded: níveis (tipo|TF|preço) cujo preço já foi tocado enquanto tinham
-// ordem pendente -> não voltam a receber ordem.
+// Os POCs candidatos (New/Naked/Tapped de todos os timeframes ligados) são
+// ordenados por preço e agrupados em ZONAS: POCs seguidos a menos de
+// "Cluster distance %" uns dos outros ficam na mesma zona (até um máximo de
+// "Max zone width %"). Cada zona é tratada como UM só nível:
+//   - zona toda abaixo do preço -> 1 ordem long  (na extremidade de cima ou no meio)
+//   - zona toda acima  do preço -> 1 ordem short (na extremidade de baixo ou no meio)
+//   - preço DENTRO da zona      -> nenhuma ordem nova dessa zona (evita o
+//     compra/vende/compra/vende enquanto o preço anda no meio dos POCs)
+//   - stop loss fica para lá da extremidade OPOSTA da zona (+ buffer %), por
+//     isso andar dentro da zona não tira a posição.
+//   - depois de a zona ser tocada, TODOS os POCs dela ficam marcados como
+//     usados e não voltam a gerar ordens.
+
+// traded: chaves (tipo|TF|preço) de POCs já usados, e IDs de zonas já executadas.
 var map<string, bool> traded = map.new<string, bool>()
 var array<string> pendIds = array.new<string>()
 var array<float>  pendPx  = array.new<float>()
+var array<string> pendMem = array.new<string>()
 
 inWindow = time >= tradeFrom and time <= tradeTo
 allowLong  = tradeDir != "Short only"
 allowShort = tradeDir != "Long only"
 
-// 1) As ordens colocadas na barra anterior estiveram ativas durante esta
-//    barra: se o preço passou pelo nível, a ordem foi executada (limit).
+// 1) As ordens colocadas na barra anterior estiveram ativas nesta barra: se o
+//    preço passou pelo preço de entrada, a zona foi executada -> marca a zona
+//    e todos os POCs que a compõem como usados.
 if array.size(pendIds) > 0
     for i = 0 to array.size(pendIds) - 1
         p = array.get(pendPx, i)
         if high >= p and low <= p
             map.put(traded, array.get(pendIds, i), true)
+            members = str.split(array.get(pendMem, i), ";")
+            for m in members
+                map.put(traded, m, true)
 
-// 2) Lista de níveis que devem ter ordem nesta barra.
-newIds = array.new<string>()
-newPx  = array.new<float>()
+// 2) POCs candidatos.
+candKey = array.new<string>()
+candPx  = array.new<float>()
 
 addLevel(string tag, float p) =>
     if not na(p)
         key = tag + str.tostring(p, format.mintick)
-        if not map.contains(traded, key) and not array.includes(newIds, key)
-            array.push(newIds, key)
-            array.push(newPx, p)
+        if not map.contains(traded, key) and not array.includes(candKey, key)
+            array.push(candKey, key)
+            array.push(candPx, p)
 
 collectTF(TFState st, float tappedSel) =>
     if tradeNew and st.showNew and st.hasNew
@@ -589,8 +623,80 @@ if inWindow
     collectTF(st2W, selTp2W)
     collectTF(st1M, selTp1M)
 
-// 3) Cancela ordens de níveis que deixaram de estar na lista (o SL/TP de
-//    entradas já executadas mantém-se).
+// 3) Agrupa em zonas (ordenado por preço, single-linkage com largura máxima).
+zLo  = array.new<float>()
+zHi  = array.new<float>()
+zCnt = array.new<int>()
+zMem = array.new<string>()
+nCand = array.size(candPx)
+if nCand > 0
+    ordIdx = array.sort_indices(candPx, order.ascending)
+    float curLo = na
+    float curHi = na
+    int curCnt = 0
+    string curMem = ""
+    for k = 0 to nCand - 1
+        j = array.get(ordIdx, k)
+        p = array.get(candPx, j)
+        key = array.get(candKey, j)
+        if na(curLo)
+            curLo := p
+            curHi := p
+            curCnt := 1
+            curMem := key
+        else if p - curHi <= curHi * clusterPct / 100 and p - curLo <= curLo * maxZonePct / 100
+            curHi := p
+            curCnt += 1
+            curMem := curMem + ";" + key
+        else
+            array.push(zLo, curLo)
+            array.push(zHi, curHi)
+            array.push(zCnt, curCnt)
+            array.push(zMem, curMem)
+            curLo := p
+            curHi := p
+            curCnt := 1
+            curMem := key
+    array.push(zLo, curLo)
+    array.push(zHi, curHi)
+    array.push(zCnt, curCnt)
+    array.push(zMem, curMem)
+
+// 4) Uma ordem por zona elegível.
+newIds = array.new<string>()
+newPx  = array.new<float>()
+newMem = array.new<string>()
+newLong = array.new<bool>()
+newSL  = array.new<float>()
+newTP  = array.new<float>()
+newQty = array.new<float>()
+nZones = array.size(zLo)
+if nZones > 0
+    for z = 0 to nZones - 1
+        lo  = array.get(zLo, z)
+        hi  = array.get(zHi, z)
+        cnt = array.get(zCnt, z)
+        inside = close >= lo and close <= hi
+        if cnt >= minPocsZone and not inside
+            isLong = hi < close
+            entryPx = entryMode == "Zone middle" ? (lo + hi) / 2 : (isLong ? hi : lo)
+            zid = "Z|" + str.tostring(lo, format.mintick) + "-" + str.tostring(hi, format.mintick) + "|" + str.tostring(cnt)
+            if ((isLong and allowLong) or (not isLong and allowShort)) and not map.contains(traded, zid)
+                farEdge = isLong ? lo : hi
+                float sl = slPct > 0 ? (isLong ? farEdge * (1 - slPct / 100) : farEdge * (1 + slPct / 100)) : na
+                float tp = tpPct > 0 ? (isLong ? entryPx * (1 + tpPct / 100) : entryPx * (1 - tpPct / 100)) : na
+                mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
+                qty = strategy.equity * basePct / 100 * mult / entryPx
+                array.push(newIds, zid)
+                array.push(newPx, entryPx)
+                array.push(newMem, array.get(zMem, z))
+                array.push(newLong, isLong)
+                array.push(newSL, sl)
+                array.push(newTP, tp)
+                array.push(newQty, qty)
+
+// 5) Cancela ordens de zonas que deixaram de existir (o SL/TP de entradas já
+//    executadas mantém-se).
 if array.size(pendIds) > 0
     for i = 0 to array.size(pendIds) - 1
         oid = array.get(pendIds, i)
@@ -599,30 +705,45 @@ if array.size(pendIds) > 0
             if not map.contains(traded, oid)
                 strategy.cancel("X|" + oid)
 
-// 4) Coloca/atualiza as ordens: POC abaixo do preço -> long, acima -> short.
+// 6) Coloca/atualiza as ordens.
 array.clear(pendIds)
 array.clear(pendPx)
+array.clear(pendMem)
 if array.size(newIds) > 0
     for i = 0 to array.size(newIds) - 1
         oid = array.get(newIds, i)
         p   = array.get(newPx, i)
-        isLong  = p < close
-        isShort = p > close
-        if (isLong and allowLong) or (isShort and allowShort)
-            strategy.entry(oid, isLong ? strategy.long : strategy.short, limit = p, comment = (isLong ? "L " : "S ") + oid)
-            float sl = slPct > 0 ? (isLong ? p * (1 - slPct / 100) : p * (1 + slPct / 100)) : na
-            float tp = tpPct > 0 ? (isLong ? p * (1 + tpPct / 100) : p * (1 - tpPct / 100)) : na
-            if slPct > 0 or tpPct > 0
-                strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp,
-                     comment_loss = "SL", comment_profit = "TP")
-            array.push(pendIds, oid)
-            array.push(pendPx, p)
-        else
-            strategy.cancel(oid)
+        isLong = array.get(newLong, i)
+        sl = array.get(newSL, i)
+        tp = array.get(newTP, i)
+        strategy.entry(oid, isLong ? strategy.long : strategy.short, qty = array.get(newQty, i), limit = p,
+             comment = (isLong ? "L " : "S ") + oid)
+        if not na(sl) or not na(tp)
+            strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+        array.push(pendIds, oid)
+        array.push(pendPx, p)
+        array.push(pendMem, array.get(newMem, i))
 
 // Fecha tudo fora da janela de trading.
 if not inWindow and strategy.position_size != 0
     strategy.close_all(comment = "Fora da janela")
+
+// Desenho das zonas (só na última barra).
+var array<box> zoneBoxes = array.new<box>()
+if barstate.islast
+    for b in zoneBoxes
+        box.delete(b)
+    array.clear(zoneBoxes)
+    if showZones and nZones > 0
+        for z = 0 to nZones - 1
+            cnt = array.get(zCnt, z)
+            if cnt >= minPocsZone
+                lo = array.get(zLo, z)
+                hi = array.get(zHi, z)
+                col = hi < close ? color.new(color.teal, 80) : lo > close ? color.new(color.red, 80) : color.new(color.orange, 80)
+                array.push(zoneBoxes, box.new(bar_index - 30, hi, bar_index + 10, lo, border_color = color.new(col, 40),
+                     bgcolor = col, extend = extend.right, text = str.tostring(cnt) + " POC" + (cnt > 1 ? "s" : ""),
+                     text_color = color.gray, text_size = size.small, text_halign = text.align_right))
 
 // ---------------------------------------------------------------------------
 // Desenho (igual ao indicador)
