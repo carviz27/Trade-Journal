@@ -1344,10 +1344,8 @@ buildTradeSel(TFState st, float ref) =>
                 array.push(pool, p)
     st.tradeSel := selectClosest(pool, nTradeLevels, ref)
 
-// Recalcula em TODAS as velas os POCs mais próximos do preço ATUAL (antes era
-// só 1x por dia, com o preço dessa hora - um POC de que o preço se aproximava
-// durante o dia podia ficar fora da lista e nunca formar zona).
-needSel := true
+if hadNewDay or nakedLive or tappedLive
+    needSel := true
 if needSel
     buildTradeSel(st1D, close)
     buildTradeSel(st2D, close)
@@ -1361,36 +1359,13 @@ if needSel
 candKey = array.new<string>()
 candPx  = array.new<float>()
 
-addCand(float p) =>
-    if not na(p)
-        key = priceKey(p)
-        if not map.contains(traded, key) and not array.includes(candKey, key)
-            array.push(candKey, key)
-            array.push(candPx, p)
-
-// Todos os POCs DESENHADOS no gráfico (New, naked e tapped mostrados) também
-// entram nas zonas - assim um POC visível, mesmo sozinho, tem sempre a sua
-// zona (com buffer).
-addShown(TFState st, array<float> nakedSel, float tappedSel) =>
-    if st.showNew and st.hasNew
-        addCand(st.newPrice)
-    if st.showNaked
-        for p in nakedSel
-            addCand(p)
-    if st.showTapped and st.hasTapped
-        addCand(tappedSel)
-
 if inWindow
     for st in allTF
         for p in st.tradeSel
-            addCand(p)
-    addShown(st1D, sel1D, selTp1D)
-    addShown(st2D, sel2D, selTp2D)
-    addShown(st3D, sel3D, selTp3D)
-    addShown(st5D, sel5D, selTp5D)
-    addShown(st1W, sel1W, selTp1W)
-    addShown(st2W, sel2W, selTp2W)
-    addShown(st1M, sel1M, selTp1M)
+            key = priceKey(p)
+            if not map.contains(traded, key) and not array.includes(candKey, key)
+                array.push(candKey, key)
+                array.push(candPx, p)
 
 // 3) Agrupa em zonas (ordenado por preço, single-linkage com largura máxima).
 zLo  = array.new<float>()
