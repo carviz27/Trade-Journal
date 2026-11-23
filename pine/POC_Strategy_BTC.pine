@@ -121,9 +121,9 @@ reuseTouched = input.bool(true, "Re-use touched POCs", group = grpStrat,
      tooltip = "ON: um POC/zona já negociado volta a poder ser usado (mesmo no próprio dia) depois de o preço se afastar dele pelo menos 'Re-arm distance %'. OFF: cada POC só é negociado uma vez.")
 rearmPct = input.float(0.5, "Re-arm distance %", minval = 0.0, step = 0.05, group = grpStrat,
      tooltip = "Distância a que o preço tem de se afastar de um POC já negociado para ele voltar a receber ordem. Evita entrar várias vezes seguidas no mesmo toque.")
-slPct = input.float(1.0, "Stop loss % (beyond far edge of zone)", minval = 0.0, step = 0.1, group = grpStrat,
+slPct = input.float(1.0, "Stop loss % beyond zone ('At zone') / zone invalidation", minval = 0.0, step = 0.1, group = grpStrat,
      tooltip = "O stop fica esta % para lá da extremidade OPOSTA da zona. 0 = sem stop loss.")
-tpPct = input.float(2.0, "Take profit %", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "0 = sem take profit (sai só por stop ou inversão).")
+tpPct = input.float(2.0, "Take profit % (only 'At zone' model)", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "Só usado no modelo de entrada 'At zone'. No modelo 'Close beyond zone (1m)' o TP é por risk:reward - ver 'Take profit R:R' no grupo 'Entry model'. 0 = sem take profit.")
 showDiag = input.bool(true, "Diagnostic table", group = grpStrat,
      tooltip = "Mostra no canto inferior direito o estado dos filtros na última vela: zonas armadas, sinais à espera, RSI e a maior vela de liquidações (longs/shorts) - para perceber porque é que uma trade não abriu.")
 tradeFrom = input.time(timestamp("2023-09-01T01:00:00"), "Trade from", group = grpStrat)
@@ -228,7 +228,7 @@ bubTextColor = input.color(color.white, "Text color (trade size number)", group 
 grpEntry = "Entry model"
 entryModel = input.string("Close beyond zone (1m)", "Entry model", options = ["Close beyond zone (1m)", "At zone (limit/market)"], group = grpEntry,
      tooltip = "Close beyond zone (1m): depois de o preço tocar a zona e os filtros confirmarem, só entra quando a PRIMEIRA vela de 1 minuto FECHAR acima da zona (long) / abaixo da zona (short). Stop no low (long) / high (short) feito desde o toque na zona; take profit em R múltiplos. At zone: modelo antigo (limit no POC ou mercado após confirmação, stop % para lá da zona, TP %).")
-rrMult = input.float(2.0, "Take profit (R multiple)", minval = 0.1, step = 0.1, group = grpEntry,
+rrMult = input.float(2.0, "Take profit R:R (risk to reward)", minval = 0.1, step = 0.1, group = grpEntry,
      tooltip = "Só no modelo 'Close beyond zone'. TP = entrada + R x (entrada - stop) num long. Recalculado com o preço real de entrada.")
 closeWait = input.int(30, "Max minutes to wait for the close beyond the zone", minval = 1, maxval = 600, group = grpEntry,
      tooltip = "Depois do toque na zona, quanto tempo espera pela vela de 1m a fechar do outro lado da zona. Os filtros (RSI/liquidações/absorção) têm de confirmar pelo menos uma vez entre o toque e a vela de entrada. O sinal é cancelado se passar este tempo, ou se o preço romper a zona até ao 'Stop loss %' (nesse modelo o 'Stop loss %' serve só para invalidar a zona; o stop real é o low/high do bounce).")
