@@ -248,6 +248,8 @@ bouncePattern = input.string("Relaxed", "Bounce pattern", options = ["Relaxed", 
      tooltip = "SHORT: primeiro uma vela VERDE tem de tocar a zona. Relaxed: depois disso, a PRIMEIRA vela VERMELHA que fecha abaixo da zona (com buffer) dá entrada, mesmo que não seja a vela seguinte (ex.: descida em várias velas). Strict: a vela vermelha tem de ser exatamente a seguinte à vela verde que tocou. LONG: espelho (vela vermelha toca, depois vela verde fecha acima).")
 showReasons = input.bool(false, "Show 'no entry' reasons", group = grpPat,
      tooltip = "Quando uma vela de 1m fecha para lá da zona (no sentido da trade) e a trade NÃO abre, desenha uma etiqueta '✗' nessa vela com o motivo.")
+flipPct = input.float(0.5, "Flip distance % (zone broken -> opposite side)", minval = 0.0, step = 0.05, group = grpPat,
+     tooltip = "Quando o preço FURA uma zona (ex.: fecha acima de uma zona de short + buffer), a zona fica DESATIVADA (cinzenta, sem trades). Só passa a ser do lado oposto (long) quando o preço fechar pelo menos esta % para lá dela. Assim, quebrar uma zona de short não dá logo um long.")
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -1406,43 +1408,53 @@ if nCand > 0
     array.push(zCnt, curCnt)
     array.push(zMem, curMem)
 
-// Lado de cada zona (long/short). Decidido quando o preço está FORA da zona
-// (abaixo do preço = long, acima = short) e MEMORIZADO: quando o preço entra
-// na zona, ela mantém o lado que tinha (antes ficava "sem lado"/amarela e
-// deixava de dar entrada).
-var map<string, bool> zoneSideMap = map.new<string, bool>()
-zoneKey(float rawLo, float rawHi) =>
-    "R|" + str.tostring(rawLo, format.mintick) + "-" + str.tostring(rawHi, format.mintick)
-zoneIsLong(float rawLo, float rawHi) =>
-    k = zoneKey(rawLo, rawHi)
-    bool res = false
-    if map.contains(zoneSideMap, k)
-        // Lado já conhecido: só muda quando o preço sai da zona JÁ COM O
-        // BUFFER desse lado (estar dentro do buffer não faz flip).
-        prev = map.get(zoneSideMap, k)
-        upP = prev ? bufLongUp : bufShortUp
-        dnP = prev ? bufLongDn : bufShortDn
+// Lado de cada zona (long/short), memorizado POR POC (não pela zona inteira):
+// se a zona mudar de composição (entra/sai um POC), mantém o lado que os seus
+// POCs já tinham. Regras:
+//   - zona nova (nenhum POC com lado): abaixo do preço = long, acima = short
+//     (preço lá dentro -> metade da zona onde está o preço).
+//   - preço dentro da zona (com buffer): mantém o lado.
+//   - preço FURA a zona para o lado errado (short: fecha acima do topo +
+//     buffer): zona DESATIVADA até o preço se afastar 'Flip distance %';
+//     a partir daí passa a ser do lado oposto.
+var map<string, bool> pocSideMap = map.new<string, bool>()
+
+// Devolve [isLong, ativa].
+zoneSideState(float rawLo, float rawHi, string mem) =>
+    keys = str.split(mem, ";")
+    bool known = false
+    bool S = false
+    for k in keys
+        if not known and map.contains(pocSideMap, k)
+            known := true
+            S := map.get(pocSideMap, k)
+    bool active = true
+    if not known
+        if rawHi < close or rawLo > close
+            S := rawHi < close
+        else
+            S := close > (rawLo + rawHi) / 2
+    else
+        upP = S ? bufLongUp : bufShortUp
+        dnP = S ? bufLongDn : bufShortDn
         bLo = rawLo * (1 - dnP / 100)
         bHi = rawHi * (1 + upP / 100)
-        if bHi < close or bLo > close
-            res := bHi < close
-            map.put(zoneSideMap, k, res)
-        else
-            res := prev
-    else
-        if rawHi < close or rawLo > close
-            res := rawHi < close
-            map.put(zoneSideMap, k, res)
-        else
-            // Preço dentro de uma zona nunca vista fora: decide pela metade
-            // da zona onde está o preço.
-            res := close > (rawLo + rawHi) / 2
-    res
+        // Preço do lado "errado" da zona?
+        bool wrongSide = S ? close < bLo : close > bHi
+        if wrongSide
+            bool farEnough = S ? close < bLo * (1 - flipPct / 100) : close > bHi * (1 + flipPct / 100)
+            if farEnough
+                S := not S        // passa a ser do lado oposto
+            else
+                active := false   // furou: desativada (sem trades) até se afastar
+    for k in keys
+        map.put(pocSideMap, k, S)
+    [S, active]
 
 // Atualiza o lado de todas as zonas em todas as velas (mesmo com posição).
 if array.size(zLo) > 0
     for z = 0 to array.size(zLo) - 1
-        zoneIsLong(array.get(zLo, z), array.get(zHi, z))
+        zoneSideState(array.get(zLo, z), array.get(zHi, z), array.get(zMem, z))
 
 // Zona alargada pelo buffer do seu lado. Devolve [lo, hi].
 zoneBuffered(float rawLo, float rawHi, bool isL) =>
@@ -1469,14 +1481,14 @@ if nZones > 0 and flat
         // Zona alargada pelo buffer do seu lado (long/short, cima/baixo).
         rawLo = array.get(zLo, z)
         rawHi = array.get(zHi, z)
-        isLong = zoneIsLong(rawLo, rawHi)
+        [isLong, zActive] = zoneSideState(rawLo, rawHi, array.get(zMem, z))
         [lo, hi] = zoneBuffered(rawLo, rawHi, isLong)
         cnt = array.get(zCnt, z)
         inside = close >= lo and close <= hi
         // Modelo novo: a zona continua armada (com o seu lado) mesmo com o
         // preço lá dentro. Modelo antigo (ordens limit): continua a não armar
         // zonas com o preço dentro.
-        if cnt >= minPocsZone and (newEntry or not inside)
+        if cnt >= minPocsZone and zActive and (newEntry or not inside)
             // Nível de toque/entrada = o POC (zona SEM buffer): o POC mais
             // próximo do preço (ou o meio da zona). O buffer só conta para o
             // fecho para lá da zona, a invalidação e a absorção.
@@ -1677,9 +1689,9 @@ if barstate.islast
             if cnt >= minPocsZone
                 rawLo = array.get(zLo, z)
                 rawHi = array.get(zHi, z)
-                zl = zoneIsLong(rawLo, rawHi)
+                [zl, zAct] = zoneSideState(rawLo, rawHi, array.get(zMem, z))
                 [lo, hi] = zoneBuffered(rawLo, rawHi, zl)
-                col = zl ? color.new(color.teal, 80) : color.new(color.red, 80)
+                col = not zAct ? color.new(color.gray, 85) : zl ? color.new(color.teal, 80) : color.new(color.red, 80)
                 array.push(zoneBoxes, box.new(bar_index - 30, hi, bar_index + 10, lo, border_color = color.new(col, 40),
                      bgcolor = col, extend = extend.right, text = str.tostring(cnt) + " POC" + (cnt > 1 ? "s" : ""),
                      text_color = color.gray, text_size = size.small, text_halign = text.align_right))
