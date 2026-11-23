@@ -32,6 +32,10 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
 //     exchange do gráfico ou agregados. Nesse modo a
 //     entrada é a mercado na barra seguinte do gráfico (no gráfico de 1m =
 //     minuto seguinte; em 15m pode chegar até 15 min de atraso).
+//   - Filtro de absorção (Big Trades, ligado por defeito): long só com um big
+//     trade de VENDA perto da zona (faixa = zona +/- tolerância manual % ou
+//     ATR) nos últimos N minutos; short com um big trade de COMPRA.
+//   - Break-even: N velas de 1m seguidas em lucro -> stop na entrada.
 //   - Saída: Stop Loss (para lá da zona) e Take Profit %.
 //
 // Só funciona em BTC (BTCUSDT, BTCUSD, BTCUSDT.P, XBTUSD, ...).
@@ -182,6 +186,26 @@ useBE = input.bool(true, "Move stop to break-even", group = grpBE,
 beBars = input.int(5, "Consecutive 1m candles in profit", minval = 1, maxval = 120, group = grpBE)
 beOffsetPct = input.float(0.0, "BE offset %", minval = 0.0, step = 0.01, group = grpBE,
      tooltip = "0 = stop exatamente no preço de entrada. Ex.: 0.05 = stop 0.05% para o lado do lucro (cobre comissões).")
+
+grpAbs = "Absorption (Big Trades)"
+useAbs = input.bool(true, "Require absorption", group = grpAbs,
+     tooltip = "Só entra se houver um BIG TRADE contra a direção da trade perto da zona (absorção): LONG precisa de um big trade de VENDA (bolha roxa), SHORT de um big trade de COMPRA (bolha verde). Mesma lógica do indicador Big Trades: cada vela intrabar (ex.: 15s) é um 'print'; close < open = venda, close >= open = compra.")
+absTF = input.timeframe("15S", "Prints resolution", group = grpAbs,
+     tooltip = "Resolução das velas intrabar usadas como prints. Tem de ser menor que o gráfico (é ajustada automaticamente se não for). Segundos exigem plano pago.")
+absWindow = input.int(15, "Time window (minutes)", minval = 1, maxval = 240, group = grpAbs,
+     tooltip = "O big trade tem de ter acontecido nos últimos N minutos antes da entrada (inclui a aproximação à zona).")
+absTolMode = input.string("ATR", "Proximity band", options = ["ATR", "Manual %"], group = grpAbs,
+     tooltip = "A bolha conta se a vela do print tocar a zona alargada por esta tolerância (para os dois lados: um pouco antes da zona e um pouco para lá dela).")
+absTolPct = input.float(0.2, "Manual tolerance %", minval = 0.0, step = 0.05, group = grpAbs, active = absTolMode == "Manual %")
+absAtrTF  = input.timeframe("5", "ATR timeframe", group = grpAbs, active = absTolMode == "ATR")
+absAtrLen = input.int(14, "ATR length", minval = 1, group = grpAbs, active = absTolMode == "ATR")
+absAtrMult = input.float(0.5, "ATR multiplier", minval = 0.0, step = 0.1, group = grpAbs, active = absTolMode == "ATR")
+absSizeMode = input.string("Relative", "Size filter", options = ["Relative", "Absolute"], group = grpAbs,
+     tooltip = "Relative: volume do print >= K x média dos prints anteriores (adapta-se à hora/volatilidade). Absolute: volume mínimo fixo.")
+absRelMult = input.float(5.0, "Relative: K x average", minval = 1.0, step = 0.5, group = grpAbs, active = absSizeMode == "Relative")
+absRelLen  = input.int(200, "Relative: average of last N prints", minval = 10, maxval = 5000, group = grpAbs, active = absSizeMode == "Relative")
+absMin     = input.float(20, "Absolute: minimum size", minval = 0.0, group = grpAbs, active = absSizeMode == "Absolute")
+absUnits   = input.string("BTC", "Absolute: units", options = ["BTC", "USDT"], group = grpAbs, active = absSizeMode == "Absolute")
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -640,12 +664,16 @@ var array<float>  pendPx   = array.new<float>()
 var array<string> pendMem  = array.new<string>()
 var array<bool>   pendLong = array.new<bool>()
 var array<float>  pendSL   = array.new<float>()
+var array<float>  pendLo   = array.new<float>()
+var array<float>  pendHi   = array.new<float>()
 var array<int>    pendCnt  = array.new<int>()
 // Sinais à espera do RSI (zona tocada, RSI ainda não no extremo).
 var array<string> trgBase  = array.new<string>()
 var array<bool>   trgLong  = array.new<bool>()
 var array<float>  trgEntry = array.new<float>()
 var array<float>  trgSL    = array.new<float>()
+var array<float>  trgLo    = array.new<float>()
+var array<float>  trgHi    = array.new<float>()
 var array<string> trgMem   = array.new<string>()
 var array<int>    trgCnt   = array.new<int>()
 var array<int>    trgExp   = array.new<int>()
@@ -859,7 +887,78 @@ liqBestAll(bool lg, int mT) =>
             bestAll := math.max(bestAll, array.max(sums))
     bestAll
 
-useConfirm = useRsi or useLiq
+// ---------------------------------------------------------------------------
+// Absorção (Big Trades): prints = velas intrabar (ex.: 15s). Guarda os prints
+// "grandes" dos últimos minutos (hora, mínima, máxima, venda/compra, tamanho).
+// ---------------------------------------------------------------------------
+absChartSec = timeframe.in_seconds(timeframe.period)
+absMaxSec = absChartSec > 3600 ? 3600 : absChartSec > 1800 ? 1800 : absChartSec > 900 ? 900 : absChartSec > 300 ? 300 : absChartSec > 60 ? 60 : absChartSec > 30 ? 30 : absChartSec > 15 ? 15 : absChartSec > 5 ? 5 : absChartSec > 1 ? 1 : 0
+if useAbs and absMaxSec == 0
+    runtime.error("Absorption: o gráfico já está em 1S; não há resolução intrabar mais baixa para os prints.")
+absEffSec = math.min(timeframe.in_seconds(absTF), absMaxSec)
+absEffTF = absEffSec <= 1 ? "1S" : absEffSec <= 5 ? "5S" : absEffSec <= 15 ? "15S" : absEffSec <= 30 ? "30S" : absEffSec <= 60 ? "1" : absEffSec <= 300 ? "5" : absEffSec <= 900 ? "15" : absEffSec <= 1800 ? "30" : "60"
+
+var array<int>   bpT    = array.new<int>()
+var array<float> bpLo   = array.new<float>()
+var array<float> bpHi   = array.new<float>()
+var array<bool>  bpSell = array.new<bool>()
+var array<float> bpSize = array.new<float>()
+var array<float> absVolHist = array.new<float>()
+var int absLastT = 0
+
+float absAtr = na
+if useAbs and absTolMode == "ATR"
+    absAtr := request.security(syminfo.tickerid, absAtrTF, ta.atr(absAtrLen))
+
+if useAbs
+    [pO, pH, pL, pC, pV, pT] = request.security_lower_tf(syminfo.tickerid, absEffTF, [open, high, low, close, volume, time])
+    nP = array.size(pC)
+    if nP > 0
+        for i = 0 to nP - 1
+            t = array.get(pT, i)
+            if t > absLastT
+                absLastT := t
+                v = array.get(pV, i)
+                c = array.get(pC, i)
+                float avgPrev = array.size(absVolHist) >= 10 ? array.avg(absVolHist) : na
+                bool big = absSizeMode == "Relative" ? (not na(avgPrev) and avgPrev > 0 and v >= absRelMult * avgPrev) : ((absUnits == "USDT" ? v * c : v) >= absMin)
+                if big
+                    array.push(bpT, t)
+                    array.push(bpLo, array.get(pL, i))
+                    array.push(bpHi, array.get(pH, i))
+                    array.push(bpSell, c < array.get(pO, i))
+                    array.push(bpSize, v)
+                array.push(absVolHist, v)
+                if array.size(absVolHist) > absRelLen
+                    array.shift(absVolHist)
+    while array.size(bpT) > 0 and array.get(bpT, 0) < time - (absWindow + 5) * 60000
+        array.shift(bpT)
+        array.shift(bpLo)
+        array.shift(bpHi)
+        array.shift(bpSell)
+        array.shift(bpSize)
+
+// Há absorção para esta zona no minuto que abriu em mT?
+// Long -> big trade de VENDA; short -> big trade de COMPRA; vela do print a
+// tocar [zoneLo - tol, zoneHi + tol]; nos últimos absWindow minutos (só prints
+// já fechados até ao fim desse minuto).
+absCheck(bool lg, int mT, float zLo_, float zHi_) =>
+    float tol = absTolMode == "ATR" ? (na(absAtr) ? 0.0 : absAtr * absAtrMult) : (zLo_ + zHi_) / 2 * absTolPct / 100
+    bandLo = zLo_ - tol
+    bandHi = zHi_ + tol
+    tEnd = mT + 60000
+    tStart = tEnd - absWindow * 60000
+    float best = 0.0
+    n = array.size(bpT)
+    if n > 0
+        for i = 0 to n - 1
+            t = array.get(bpT, i)
+            if t >= tStart and t < tEnd and array.get(bpSell, i) == lg
+                if array.get(bpHi, i) >= bandLo and array.get(bpLo, i) <= bandHi
+                    best := math.max(best, array.get(bpSize, i))
+    [best > 0, best > 0 ? " ABS " + str.tostring(best, "#.##") : ""]
+
+useConfirm = useRsi or useLiq or useAbs
 
 m1H = array.new<float>()
 m1L = array.new<float>()
@@ -953,6 +1052,8 @@ if useConfirm
                         array.push(trgLong, lg)
                         array.push(trgEntry, ep)
                         array.push(trgSL, array.get(pendSL, i))
+                        array.push(trgLo, array.get(pendLo, i))
+                        array.push(trgHi, array.get(pendHi, i))
                         array.push(trgMem, array.get(pendMem, i))
                         array.push(trgCnt, array.get(pendCnt, i))
                         array.push(trgExp, mT + rsiWindow * 60000)
@@ -967,6 +1068,8 @@ if useConfirm
                         array.remove(trgLong, i)
                         array.remove(trgEntry, i)
                         array.remove(trgSL, i)
+                        array.remove(trgLo, i)
+                        array.remove(trgHi, i)
                         array.remove(trgMem, i)
                         array.remove(trgCnt, i)
                         array.remove(trgExp, i)
@@ -979,15 +1082,17 @@ if useConfirm
                     [liqOk0, liqLbl] = liqCheck(lg, mT)
                     rsiOk = not useRsi or rsiOk0
                     liqOk = not useLiq or liqOk0
+                    [absOk0, absLbl] = absCheck(lg, mT, array.get(trgLo, i), array.get(trgHi, i))
+                    absOk = not useAbs or absOk0
                     slOk = na(sl) or (lg ? sl < close : sl > close)
-                    if not enteredNow and rsiOk and liqOk and slOk
+                    if not enteredNow and rsiOk and liqOk and absOk and slOk
                         b = array.get(trgBase, i)
                         cnt = array.get(trgCnt, i)
                         eid = b + "#" + str.tostring(map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0)
                         float tp = tpPct > 0 ? (lg ? close * (1 + tpPct / 100) : close * (1 - tpPct / 100)) : na
                         mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
                         strategy.entry(eid, lg ? strategy.long : strategy.short, qty = strategy.equity * basePct / 100 * mult / close,
-                             comment = (lg ? "L " : "S ") + eid + (useRsi ? " RSI" + rsiLbl : "") + (useLiq ? " LIQ" + liqLbl : ""))
+                             comment = (lg ? "L " : "S ") + eid + (useRsi ? " RSI" + rsiLbl : "") + (useLiq ? " LIQ" + liqLbl : "") + (useAbs ? absLbl : ""))
                         strategy.exit("X|" + eid, from_entry = eid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
                         map.put(tpById, eid, tp)
                         map.put(filled, eid, true)
@@ -1002,6 +1107,8 @@ if useConfirm
         array.clear(trgLong)
         array.clear(trgEntry)
         array.clear(trgSL)
+        array.clear(trgLo)
+        array.clear(trgHi)
         array.clear(trgMem)
         array.clear(trgCnt)
         array.clear(trgExp)
@@ -1098,6 +1205,8 @@ newPx  = array.new<float>()
 newMem = array.new<string>()
 newLong = array.new<bool>()
 newSL  = array.new<float>()
+newLo  = array.new<float>()
+newHi  = array.new<float>()
 newTP  = array.new<float>()
 newQty = array.new<float>()
 newCnt = array.new<int>()
@@ -1124,6 +1233,8 @@ if nZones > 0 and flat
                 array.push(newMem, array.get(zMem, z))
                 array.push(newLong, isLong)
                 array.push(newSL, sl)
+                array.push(newLo, lo)
+                array.push(newHi, hi)
                 array.push(newTP, tp)
                 array.push(newQty, qty)
                 array.push(newCnt, cnt)
@@ -1151,6 +1262,8 @@ array.clear(pendPx)
 array.clear(pendMem)
 array.clear(pendLong)
 array.clear(pendSL)
+array.clear(pendLo)
+array.clear(pendHi)
 array.clear(pendCnt)
 if array.size(newIds) > 0
     for i = 0 to array.size(newIds) - 1
@@ -1168,9 +1281,10 @@ if array.size(newIds) > 0
         if useConfirm and preLimit and flat
             [rOk0, rLbl0] = rsiCheck(isLong)
             [lOk0, lLbl0] = liqCheck(isLong, lastStepT)
-            if (not useRsi or rOk0) and (not useLiq or lOk0)
+            [aOk0, aLbl0] = absCheck(isLong, lastStepT, array.get(newLo, i), array.get(newHi, i))
+            if (not useRsi or rOk0) and (not useLiq or lOk0) and (not useAbs or aOk0)
                 placeLimit := true
-                cmt := " LIM" + (useRsi ? " RSI" + rLbl0 : "") + (useLiq ? " LIQ" + lLbl0 : "")
+                cmt := " LIM" + (useRsi ? " RSI" + rLbl0 : "") + (useLiq ? " LIQ" + lLbl0 : "") + (useAbs ? aLbl0 : "")
         if placeLimit
             strategy.entry(oid, isLong ? strategy.long : strategy.short, qty = array.get(newQty, i), limit = p,
                  oca_name = ocaName, oca_type = strategy.oca.cancel,
@@ -1181,6 +1295,8 @@ if array.size(newIds) > 0
             array.push(placedNow, oid)
         array.push(pendLong, isLong)
         array.push(pendSL, sl)
+        array.push(pendLo, array.get(newLo, i))
+        array.push(pendHi, array.get(newHi, i))
         array.push(pendCnt, array.get(newCnt, i))
         array.push(pendIds, oid)
         array.push(pendBase, array.get(newBase, i))
@@ -1236,7 +1352,7 @@ if not inWindow and strategy.position_size != 0
 
 // Tabela de diagnóstico (última vela).
 if barstate.islast and showDiag
-    var table dg = table.new(position.bottom_left, 2, 7, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
+    var table dg = table.new(position.bottom_left, 2, 8, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.gray)
     lastT = array.size(m1T) > 0 ? array.last(m1T) : time
     rsiTxt = ""
     for i = 0 to 3
@@ -1256,6 +1372,17 @@ if barstate.islast and showDiag
     table.cell(dg, 1, 5, useLiq ? str.tostring(liqBestAll(false, lastT) / 1000000, "#.##") + "M  " + lqShortTicker : "off", text_color = color.white, text_size = size.small)
     table.cell(dg, 0, 6, "Unidades liq.", text_color = color.white, text_size = size.small)
     table.cell(dg, 1, 6, useLiq ? (lqInBase ? "BTC -> USD" : "USD") + " (" + lqVolType + ")" : "off", text_color = color.white, text_size = size.small)
+    int nBuyBP = 0
+    int nSellBP = 0
+    if array.size(bpT) > 0
+        for i = 0 to array.size(bpT) - 1
+            if array.get(bpT, i) >= lastT + 60000 - absWindow * 60000
+                if array.get(bpSell, i)
+                    nSellBP += 1
+                else
+                    nBuyBP += 1
+    table.cell(dg, 0, 7, "Big trades (janela) compra/venda", text_color = color.white, text_size = size.small)
+    table.cell(dg, 1, 7, useAbs ? str.tostring(nBuyBP) + " / " + str.tostring(nSellBP) + "  (" + absEffTF + ", tol " + (absTolMode == "ATR" ? str.tostring(absAtr * absAtrMult, "#.#") : str.tostring(absTolPct) + "%") + ")" : "off", text_color = color.white, text_size = size.small)
 
 // Aviso se o filtro de liquidações está ligado mas não chegam dados.
 if barstate.islast and useLiq and not lqGotData
