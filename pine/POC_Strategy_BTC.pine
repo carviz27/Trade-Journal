@@ -1344,8 +1344,10 @@ buildTradeSel(TFState st, float ref) =>
                 array.push(pool, p)
     st.tradeSel := selectClosest(pool, nTradeLevels, ref)
 
-if hadNewDay or nakedLive or tappedLive
-    needSel := true
+// Recalcula em TODAS as velas os POCs mais próximos do preço ATUAL (antes era
+// só 1x por dia, com o preço dessa hora - um POC de que o preço se aproximava
+// durante o dia podia ficar fora da lista e nunca formar zona).
+needSel := true
 if needSel
     buildTradeSel(st1D, close)
     buildTradeSel(st2D, close)
