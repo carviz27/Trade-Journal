@@ -243,6 +243,12 @@ bufShortUp  = input.float(0.1, "Short zones: above %", minval = 0.0, step = 0.01
      tooltip = "Zonas de SHORT (acima do preço): quanto a zona sobe acima do topo / desce abaixo do fundo.")
 bufShortDn  = input.float(0.1, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS")
 
+grpPat = "Bounce pattern & diagnostics"
+bouncePattern = input.string("Relaxed", "Bounce pattern", options = ["Relaxed", "Strict (next candle)"], group = grpPat,
+     tooltip = "SHORT: primeiro uma vela VERDE tem de tocar a zona. Relaxed: depois disso, a PRIMEIRA vela VERMELHA que fecha abaixo da zona (com buffer) dá entrada, mesmo que não seja a vela seguinte (ex.: descida em várias velas). Strict: a vela vermelha tem de ser exatamente a seguinte à vela verde que tocou. LONG: espelho (vela vermelha toca, depois vela verde fecha acima).")
+showReasons = input.bool(true, "Show 'no entry' reasons", group = grpPat,
+     tooltip = "Quando uma vela de 1m fecha para lá da zona (no sentido da trade) e a trade NÃO abre, desenha uma etiqueta '✗' nessa vela com o motivo.")
+
 // ---------------------------------------------------------------------------
 // Só BTC
 // ---------------------------------------------------------------------------
@@ -717,7 +723,11 @@ var array<float>  trgExt   = array.new<float>()   // low (long) / high (short) d
 var array<bool>   trgConf  = array.new<bool>()    // filtros já confirmaram?
 var array<int>    trgConfExp = array.new<int>()   // limite para os filtros confirmarem
 var array<string> trgLbl   = array.new<string>()  // texto dos filtros que confirmaram
-var array<bool>   trgPrevRT = array.new<bool>()   // vela anterior: vermelha (long) / verde (short) a tocar a zona
+var array<bool>   trgPrevRT = array.new<bool>()   // vela de toque já vista (relaxed) / vela anterior (strict)
+var array<bool>   trgRsiEv = array.new<bool>()    // diagnóstico: cada filtro já esteve OK alguma vez?
+var array<bool>   trgLiqEv = array.new<bool>()
+var array<bool>   trgAbsEv = array.new<bool>()
+var array<bool>   trgWhyShown = array.new<bool>()
 var map<string, float> slById = map.new<string, float>()
 
 trgRemove(int i) =>
@@ -735,6 +745,10 @@ trgRemove(int i) =>
     array.remove(trgConfExp, i)
     array.remove(trgLbl, i)
     array.remove(trgPrevRT, i)
+    array.remove(trgRsiEv, i)
+    array.remove(trgLiqEv, i)
+    array.remove(trgAbsEv, i)
+    array.remove(trgWhyShown, i)
 
 trgClear() =>
     array.clear(trgBase)
@@ -751,6 +765,10 @@ trgClear() =>
     array.clear(trgConfExp)
     array.clear(trgLbl)
     array.clear(trgPrevRT)
+    array.clear(trgRsiEv)
+    array.clear(trgLiqEv)
+    array.clear(trgAbsEv)
+    array.clear(trgWhyShown)
 
 // Filtro RSI multi-timeframe. Os passos de avaliação são velas de 1 minuto
 // (as da barra do gráfico via request.security_lower_tf, ou a própria barra
@@ -1186,6 +1204,10 @@ if useTrig
                         array.push(trgConfExp, mT + rsiWindow * 60000)
                         array.push(trgLbl, "")
                         array.push(trgPrevRT, false)
+                        array.push(trgRsiEv, false)
+                        array.push(trgLiqEv, false)
+                        array.push(trgAbsEv, false)
+                        array.push(trgWhyShown, false)
             // Atualiza o low/high do bounce; expira sinais antigos ou cuja
             // zona foi rompida até ao stop % da zona.
             if array.size(trgBase) > 0
@@ -1205,29 +1227,61 @@ if useTrig
                         [rsiOk0, rsiLbl] = rsiCheck(lg)
                         [liqOk0, liqLbl] = liqCheck(lg, mT)
                         [absOk0, absLbl] = absCheck(lg, mT, array.get(trgLo, i), array.get(trgHi, i))
+                        if rsiOk0
+                            array.set(trgRsiEv, i, true)
+                        if liqOk0
+                            array.set(trgLiqEv, i, true)
+                        if absOk0
+                            array.set(trgAbsEv, i, true)
                         if (not useRsi or rsiOk0) and (not useLiq or liqOk0) and (not useAbs or absOk0)
                             array.set(trgConf, i, true)
                             array.set(trgLbl, i, (useRsi ? " RSI" + rsiLbl : "") + (useLiq ? " LIQ" + liqLbl : "") + (useAbs ? absLbl : ""))
             // Entrada.
             if not enteredNow and strategy.position_size == 0 and inWindow and array.size(trgBase) > 0
                 for i = array.size(trgBase) - 1 to 0
-                    if not enteredNow and array.get(trgConf, i)
+                    if not enteredNow
                         lg = array.get(trgLong, i)
+                        bool confd = array.get(trgConf, i)
                         float sl = na
                         float tp = na
                         bool go = false
                         if newEntry
-                            // Padrão de bounce: vela ANTERIOR vermelha (long) a tocar
-                            // a zona + esta vela fecha verde (e acima da zona, se
-                            // 'bounceBeyond'). Short: espelho.
+                            // Padrão de bounce: vela de toque (vermelha num long /
+                            // verde num short) já vista + esta vela fecha verde
+                            // (long) / vermelha (short), e para lá da zona se
+                            // 'bounceBeyond'.
                             bool bounceCandle = lg ? mC > mO : mC < mO
                             bool beyondOk = not bounceBeyond or (lg ? mC > array.get(trgHi, i) : mC < array.get(trgLo, i))
-                            go := array.get(trgPrevRT, i) and bounceCandle and beyondOk
+                            bool patOk = array.get(trgPrevRT, i)
                             ext = array.get(trgExt, i)
                             sl := lg ? ext * (1 - slBufferPct / 100) : ext * (1 + slBufferPct / 100)
-                            go := go and (lg ? sl < mC : sl > mC)
+                            bool slOkN = lg ? sl < mC : sl > mC
+                            go := confd and patOk and bounceCandle and beyondOk and slOkN
                             tp := lg ? mC + rrMult * (mC - sl) : mC - rrMult * (sl - mC)
-                        else
+                            // Diagnóstico: vela fechou para lá da zona (no sentido da
+                            // trade) mas a trade não abriu -> etiqueta com o motivo
+                            // (uma vez por sinal).
+                            bool closedBeyond = lg ? mC > array.get(trgHi, i) : mC < array.get(trgLo, i)
+                            if showReasons and closedBeyond and bounceCandle and not go and not array.get(trgWhyShown, i)
+                                array.set(trgWhyShown, i, true)
+                                string why = ""
+                                if not patOk
+                                    why += "sem vela de toque " + (lg ? "vermelha" : "verde") + " antes\n"
+                                if not confd
+                                    why += "filtros não confirmaram no mesmo minuto:"
+                                    if useRsi
+                                        why += " RSI" + (array.get(trgRsiEv, i) ? "✓" : "✗")
+                                    if useLiq
+                                        why += " LIQ" + (array.get(trgLiqEv, i) ? "✓" : "✗")
+                                    if useAbs
+                                        why += " ABS" + (array.get(trgAbsEv, i) ? "✓" : "✗")
+                                    why += "\n"
+                                if not slOkN
+                                    why += "stop inválido\n"
+                                label.new(bar_index, lg ? low : high, "✗ " + (lg ? "L" : "S") + "\n" + why,
+                                     style = lg ? label.style_label_up : label.style_label_down,
+                                     color = color.new(color.gray, 20), textcolor = color.white, size = size.small)
+                        else if confd
                             sl := array.get(trgSL, i)
                             go := na(sl) or (lg ? sl < mC : sl > mC)
                             tp := tpPct > 0 ? (lg ? mC * (1 + tpPct / 100) : mC * (1 - tpPct / 100)) : na
@@ -1254,7 +1308,8 @@ if useTrig
                 for i = 0 to array.size(trgBase) - 1
                     lg = array.get(trgLong, i)
                     touchesNow = lg ? mL <= array.get(trgHi, i) : mH >= array.get(trgLo, i)
-                    array.set(trgPrevRT, i, touchesNow and (lg ? mC < mO : mC > mO))
+                    bool touchCandle = touchesNow and (lg ? mC < mO : mC > mO)
+                    array.set(trgPrevRT, i, bouncePattern == "Relaxed" ? (array.get(trgPrevRT, i) or touchCandle) : touchCandle)
     if enteredNow
         trgClear()
 
