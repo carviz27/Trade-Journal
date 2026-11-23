@@ -235,6 +235,8 @@ closeWait = input.int(30, "Max minutes to wait for the close beyond the zone", m
 slBufferPct = input.float(0.0, "Stop buffer % (below the low / above the high)", minval = 0.0, step = 0.01, group = grpEntry)
 bounceBeyond = input.bool(true, "Bounce candle must close beyond the zone", group = grpEntry,
      tooltip = "Padrão de entrada (long): uma vela de 1m VERMELHA toca a zona (pode deixar wick) e a vela SEGUINTE fecha VERDE -> entrada. ON: essa vela verde também tem de fechar acima do topo da zona. Short: vela VERDE toca a zona e a seguinte fecha VERMELHA (abaixo da zona, se ON). Uma vela que toca e fecha logo do outro lado NÃO dá entrada.")
+zoneBufPct = input.float(0.1, "Zone buffer % (above and below)", minval = 0.0, step = 0.01, group = grpEntry,
+     tooltip = "Alarga a zona de POCs esta % para cima e para baixo. O toque, o fecho para lá da zona e o desenho das caixas usam a zona alargada. 0 = sem buffer.")
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -1351,8 +1353,9 @@ newCnt = array.new<int>()
 nZones = array.size(zLo)
 if nZones > 0 and flat
     for z = 0 to nZones - 1
-        lo  = array.get(zLo, z)
-        hi  = array.get(zHi, z)
+        // Zona alargada pelo buffer (para cima e para baixo).
+        lo  = array.get(zLo, z) * (1 - zoneBufPct / 100)
+        hi  = array.get(zHi, z) * (1 + zoneBufPct / 100)
         cnt = array.get(zCnt, z)
         inside = close >= lo and close <= hi
         if cnt >= minPocsZone and not inside
@@ -1552,8 +1555,8 @@ if barstate.islast
         for z = 0 to nZones - 1
             cnt = array.get(zCnt, z)
             if cnt >= minPocsZone
-                lo = array.get(zLo, z)
-                hi = array.get(zHi, z)
+                lo = array.get(zLo, z) * (1 - zoneBufPct / 100)
+                hi = array.get(zHi, z) * (1 + zoneBufPct / 100)
                 col = hi < close ? color.new(color.teal, 80) : lo > close ? color.new(color.red, 80) : color.new(color.orange, 80)
                 array.push(zoneBoxes, box.new(bar_index - 30, hi, bar_index + 10, lo, border_color = color.new(col, 40),
                      bgcolor = col, extend = extend.right, text = str.tostring(cnt) + " POC" + (cnt > 1 ? "s" : ""),
