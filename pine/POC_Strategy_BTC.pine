@@ -243,6 +243,12 @@ bufShortUp  = input.float(0.1, "Short zones: above %", minval = 0.0, step = 0.01
      tooltip = "Zonas de SHORT (acima do preço): quanto a zona sobe acima do topo / desce abaixo do fundo.")
 bufShortDn  = input.float(0.1, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS")
 
+grpPeak = "RSI peak & diagnostics"
+rsiUsePeak = input.bool(true, "RSI: use candle peak", group = grpPeak,
+     tooltip = "ON: o RSI de cada minuto é calculado no EXTREMO da vela (máxima para shorts, mínima para longs) - o pico que o RSI atingiu ao vivo, mesmo que a vela feche com o RSI já fora de overbought/oversold. OFF: RSI no fecho da vela.")
+showReasons = input.bool(true, "Show 'no entry' reasons", group = grpPeak,
+     tooltip = "Quando o padrão de bounce aparece (vela que toca a zona + vela de bounce) mas a trade NÃO abre, desenha uma etiqueta '✗' na vela com o motivo (filtro em falta, fecho dentro da zona, ...).")
+
 // ---------------------------------------------------------------------------
 // Só BTC
 // ---------------------------------------------------------------------------
@@ -718,6 +724,12 @@ var array<bool>   trgConf  = array.new<bool>()    // filtros já confirmaram?
 var array<int>    trgConfExp = array.new<int>()   // limite para os filtros confirmarem
 var array<string> trgLbl   = array.new<string>()  // texto dos filtros que confirmaram
 var array<bool>   trgPrevRT = array.new<bool>()   // vela anterior: vermelha (long) / verde (short) a tocar a zona
+var array<bool>   trgRsiOk = array.new<bool>()    // cada filtro: já confirmou desde o toque?
+var array<bool>   trgLiqOk = array.new<bool>()
+var array<bool>   trgAbsOk = array.new<bool>()
+var array<string> trgRsiL  = array.new<string>()
+var array<string> trgLiqL  = array.new<string>()
+var array<string> trgAbsL  = array.new<string>()
 var map<string, float> slById = map.new<string, float>()
 
 trgRemove(int i) =>
@@ -735,6 +747,12 @@ trgRemove(int i) =>
     array.remove(trgConfExp, i)
     array.remove(trgLbl, i)
     array.remove(trgPrevRT, i)
+    array.remove(trgRsiOk, i)
+    array.remove(trgLiqOk, i)
+    array.remove(trgAbsOk, i)
+    array.remove(trgRsiL, i)
+    array.remove(trgLiqL, i)
+    array.remove(trgAbsL, i)
 
 trgClear() =>
     array.clear(trgBase)
@@ -751,6 +769,12 @@ trgClear() =>
     array.clear(trgConfExp)
     array.clear(trgLbl)
     array.clear(trgPrevRT)
+    array.clear(trgRsiOk)
+    array.clear(trgLiqOk)
+    array.clear(trgAbsOk)
+    array.clear(trgRsiL)
+    array.clear(trgLiqL)
+    array.clear(trgAbsL)
 
 // Filtro RSI multi-timeframe. Os passos de avaliação são velas de 1 minuto
 // (as da barra do gráfico via request.security_lower_tf, ou a própria barra
@@ -814,6 +838,28 @@ rsiFeed(int t, float c) =>
             array.set(curRsi, i, r)
 
 // RSI confirma a direção? Devolve [ok, texto com os RSIs que confirmaram].
+// RSI de cada timeframe se o preço atual fosse 'price' (ex.: a máxima da
+// vela) - usa o mesmo estado (RMA) que rsiFeed, já atualizado neste minuto.
+rsiCheckAt(bool lg, float price) =>
+    int nOn = 0
+    int nHit = 0
+    string lbl = ""
+    for i = 0 to 3
+        if array.get(rsOn, i)
+            nOn += 1
+            prev2 = array.get(rsPrev, i)
+            aG = array.get(rsAvgG, i)
+            float r = na
+            if not na(prev2) and not na(aG)
+                chP = price - prev2
+                dG = (aG * (rsiLen - 1) + math.max(chP, 0)) / rsiLen
+                dL = (array.get(rsAvgL, i) * (rsiLen - 1) + math.max(-chP, 0)) / rsiLen
+                r := dL == 0 ? 100.0 : dG == 0 ? 0.0 : 100 - 100 / (1 + dG / dL)
+            if not na(r) and (lg ? r < rsiOS : r > rsiOB)
+                nHit += 1
+                lbl := lbl + " " + str.tostring(array.get(rsMins, i)) + "m:" + str.tostring(r, "#")
+    [nOn > 0 and (rsiCombine == "Any" ? nHit > 0 : nHit == nOn), lbl]
+
 rsiCheck(bool lg) =>
     int nOn = 0
     int nHit = 0
@@ -1186,6 +1232,12 @@ if useTrig
                         array.push(trgConfExp, mT + rsiWindow * 60000)
                         array.push(trgLbl, "")
                         array.push(trgPrevRT, false)
+                        array.push(trgRsiOk, false)
+                        array.push(trgLiqOk, false)
+                        array.push(trgAbsOk, false)
+                        array.push(trgRsiL, "")
+                        array.push(trgLiqL, "")
+                        array.push(trgAbsL, "")
             // Atualiza o low/high do bounce; expira sinais antigos ou cuja
             // zona foi rompida até ao stop % da zona.
             if array.size(trgBase) > 0
@@ -1198,21 +1250,36 @@ if useTrig
                         trgRemove(i)
             // Filtros: no modelo novo basta confirmarem uma vez desde o toque
             // (até ao limite 'Minutes after touch...' ou até à vela de entrada).
+            // Cada filtro só precisa de confirmar UMA vez entre o toque e a
+            // entrada (não têm de coincidir no mesmo minuto).
             if array.size(trgBase) > 0
                 for i = 0 to array.size(trgBase) - 1
                     if not array.get(trgConf, i)
                         lg = array.get(trgLong, i)
-                        [rsiOk0, rsiLbl] = rsiCheck(lg)
-                        [liqOk0, liqLbl] = liqCheck(lg, mT)
-                        [absOk0, absLbl] = absCheck(lg, mT, array.get(trgLo, i), array.get(trgHi, i))
-                        if (not useRsi or rsiOk0) and (not useLiq or liqOk0) and (not useAbs or absOk0)
+                        if useRsi and not array.get(trgRsiOk, i)
+                            [rsiOk0, rsiLbl] = rsiUsePeak ? rsiCheckAt(lg, lg ? mL : mH) : rsiCheck(lg)
+                            if rsiOk0
+                                array.set(trgRsiOk, i, true)
+                                array.set(trgRsiL, i, " RSI" + rsiLbl)
+                        if useLiq and not array.get(trgLiqOk, i)
+                            [liqOk0, liqLbl] = liqCheck(lg, mT)
+                            if liqOk0
+                                array.set(trgLiqOk, i, true)
+                                array.set(trgLiqL, i, " LIQ" + liqLbl)
+                        if useAbs and not array.get(trgAbsOk, i)
+                            [absOk0, absLbl] = absCheck(lg, mT, array.get(trgLo, i), array.get(trgHi, i))
+                            if absOk0
+                                array.set(trgAbsOk, i, true)
+                                array.set(trgAbsL, i, absLbl)
+                        if (not useRsi or array.get(trgRsiOk, i)) and (not useLiq or array.get(trgLiqOk, i)) and (not useAbs or array.get(trgAbsOk, i))
                             array.set(trgConf, i, true)
-                            array.set(trgLbl, i, (useRsi ? " RSI" + rsiLbl : "") + (useLiq ? " LIQ" + liqLbl : "") + (useAbs ? absLbl : ""))
+                            array.set(trgLbl, i, array.get(trgRsiL, i) + array.get(trgLiqL, i) + array.get(trgAbsL, i))
             // Entrada.
             if not enteredNow and strategy.position_size == 0 and inWindow and array.size(trgBase) > 0
                 for i = array.size(trgBase) - 1 to 0
-                    if not enteredNow and array.get(trgConf, i)
+                    if not enteredNow
                         lg = array.get(trgLong, i)
+                        bool confd = array.get(trgConf, i)
                         float sl = na
                         float tp = na
                         bool go = false
@@ -1221,13 +1288,30 @@ if useTrig
                             // a zona + esta vela fecha verde (e acima da zona, se
                             // 'bounceBeyond'). Short: espelho.
                             bool bounceCandle = lg ? mC > mO : mC < mO
+                            bool patternOk = array.get(trgPrevRT, i) and bounceCandle
                             bool beyondOk = not bounceBeyond or (lg ? mC > array.get(trgHi, i) : mC < array.get(trgLo, i))
-                            go := array.get(trgPrevRT, i) and bounceCandle and beyondOk
                             ext = array.get(trgExt, i)
                             sl := lg ? ext * (1 - slBufferPct / 100) : ext * (1 + slBufferPct / 100)
-                            go := go and (lg ? sl < mC : sl > mC)
+                            bool slOkN = lg ? sl < mC : sl > mC
+                            go := confd and patternOk and beyondOk and slOkN
                             tp := lg ? mC + rrMult * (mC - sl) : mC - rrMult * (sl - mC)
-                        else
+                            // Diagnóstico: padrão apareceu mas não entrou -> motivo.
+                            if showReasons and patternOk and not go
+                                string why = ""
+                                if useRsi and not array.get(trgRsiOk, i)
+                                    why += "sem RSI " + (lg ? "OS" : "OB") + "\n"
+                                if useLiq and not array.get(trgLiqOk, i)
+                                    why += "liquidações < mínimo\n"
+                                if useAbs and not array.get(trgAbsOk, i)
+                                    why += "sem absorção (big trade " + (lg ? "venda" : "compra") + ")\n"
+                                if not beyondOk
+                                    why += "fechou dentro da zona\n"
+                                if not slOkN
+                                    why += "stop inválido\n"
+                                label.new(bar_index, lg ? low : high, "✗ " + (lg ? "L" : "S") + "\n" + why,
+                                     style = lg ? label.style_label_up : label.style_label_down,
+                                     color = color.new(color.gray, 20), textcolor = color.white, size = size.small)
+                        else if confd
                             sl := array.get(trgSL, i)
                             go := na(sl) or (lg ? sl < mC : sl > mC)
                             tp := tpPct > 0 ? (lg ? mC * (1 + tpPct / 100) : mC * (1 - tpPct / 100)) : na
