@@ -250,6 +250,8 @@ showReasons = input.bool(false, "Show 'no entry' reasons", group = grpPat,
      tooltip = "Quando uma vela de 1m fecha para lá da zona (no sentido da trade) e a trade NÃO abre, desenha uma etiqueta '✗' nessa vela com o motivo.")
 flipPct = input.float(0.5, "Flip distance % (zone broken -> opposite side)", minval = 0.0, step = 0.05, group = grpPat,
      tooltip = "Quando o preço FURA uma zona (ex.: fecha acima de uma zona de short + buffer), a zona fica DESATIVADA (cinzenta, sem trades). Só passa a ser do lado oposto (long) quando o preço fechar pelo menos esta % para lá dela. Assim, quebrar uma zona de short não dá logo um long.")
+liqMode = input.string("Bars back OR in zone", "Liquidations rule", options = ["Bars back", "In zone (since touch)", "Bars back OR in zone"], group = grpLiq,
+     tooltip = "Bars back: uma vela de liquidações (atual ou N anteriores) >= mínimo. In zone: a SOMA das liquidações desde o minuto em que o preço tocou o POC (enquanto está na zona) até agora >= mínimo. OR: basta uma das duas. (No modelo antigo 'At zone' usa sempre Bars back.)")
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -1093,6 +1095,19 @@ absCheck(bool lg, int tFrom, int mT, float zLo_, float zHi_) =>
                     best := math.max(best, array.get(bpSize, i))
     [best > 0, best > 0 ? " ABS " + str.tostring(best, "#.##") : ""]
 
+// Liquidações acumuladas desde o minuto do toque (tFrom) até ao minuto mT.
+liqZoneCheck(bool lg, int tFrom, int mT) =>
+    bufT = lg ? lqLongT : lqShortT
+    bufV = lg ? lqLongV : lqShortV
+    float sum = 0.0
+    nb = array.size(bufT)
+    if nb > 0
+        for i = 0 to nb - 1
+            t = array.get(bufT, i)
+            if t >= tFrom and t <= mT
+                sum += array.get(bufV, i)
+    [sum >= liqMin, sum >= liqMin ? " zone:" + str.tostring(sum / 1000000, "#.#") + "M" : ""]
+
 useConfirm = useRsi or useLiq or useAbs
 newEntry = entryModel == "Close beyond zone (1m)"
 // O modelo novo usa sempre o caminho "toque -> sinal -> entrada" (sem ordens
@@ -1231,7 +1246,10 @@ if useTrig
                     if not array.get(trgConf, i)
                         lg = array.get(trgLong, i)
                         [rsiOk0, rsiLbl] = rsiCheck(lg)
-                        [liqOk0, liqLbl] = liqCheck(lg, mT)
+                        [liqBB, liqLblBB] = liqCheck(lg, mT)
+                        [liqZN, liqLblZN] = liqZoneCheck(lg, array.get(trgStartT, i), mT)
+                        bool liqOk0 = not newEntry or liqMode == "Bars back" ? liqBB : liqMode == "In zone (since touch)" ? liqZN : (liqBB or liqZN)
+                        string liqLbl = (not newEntry or liqMode != "In zone (since touch)" ? liqLblBB : "") + (newEntry and liqMode != "Bars back" ? liqLblZN : "")
                         // Modelo novo: sem janela de tempo - qualquer big trade na zona
                         // desde o minuto do toque. Modelo antigo: janela 'absWindow'.
                         tFromA = newEntry ? array.get(trgStartT, i) : mT + 60000 - absWindow * 60000
