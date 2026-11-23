@@ -195,8 +195,8 @@ useAbs = input.bool(true, "Require absorption", group = grpAbs,
      tooltip = "Só entra se houver um BIG TRADE contra a direção da trade perto da zona (absorção): LONG precisa de um big trade de VENDA (bolha roxa), SHORT de um big trade de COMPRA (bolha verde). Mesma lógica do indicador Big Trades: cada vela intrabar (ex.: 15s) é um 'print'; close < open = venda, close >= open = compra.")
 absTF = input.timeframe("5S", "Prints resolution", group = grpAbs,
      tooltip = "Resolução das velas intrabar usadas como prints. Tem de ser menor que o gráfico (é ajustada automaticamente se não for). Segundos exigem plano pago.")
-absWindow = input.int(3, "Time window (minutes)", minval = 1, maxval = 240, group = grpAbs,
-     tooltip = "O big trade tem de ter acontecido nos últimos N minutos antes da entrada (inclui a aproximação à zona).")
+absWindow = input.int(3, "Time window (minutes) - only 'At zone' model", minval = 1, maxval = 240, group = grpAbs,
+     tooltip = "No modelo 'Close beyond zone (1m)' NÃO há janela de tempo: basta um big trade na zona (faixa de proximidade) desde o toque no POC até à entrada. Esta janela só é usada no modelo antigo 'At zone'.")
 absTolMode = input.string("Manual %", "Proximity band", options = ["ATR", "Manual %"], group = grpAbs,
      tooltip = "A bolha conta se a vela do print tocar a zona alargada por esta tolerância (para os dois lados: um pouco antes da zona e um pouco para lá dela).")
 absTolPct = input.float(0.2, "Manual tolerance %", minval = 0.0, step = 0.05, group = grpAbs, active = absTolMode == "Manual %")
@@ -726,6 +726,7 @@ var array<bool>   trgConf  = array.new<bool>()    // filtros já confirmaram?
 var array<int>    trgConfExp = array.new<int>()   // limite para os filtros confirmarem
 var array<string> trgLbl   = array.new<string>()  // texto dos filtros que confirmaram
 var array<bool>   trgPrevRT = array.new<bool>()   // vela de toque já vista (relaxed) / vela anterior (strict)
+var array<int>    trgStartT = array.new<int>()    // hora do minuto do toque (absorção conta a partir daqui)
 var array<bool>   trgRsiEv = array.new<bool>()    // diagnóstico: cada filtro já esteve OK alguma vez?
 var array<bool>   trgLiqEv = array.new<bool>()
 var array<bool>   trgAbsEv = array.new<bool>()
@@ -747,6 +748,7 @@ trgRemove(int i) =>
     array.remove(trgConfExp, i)
     array.remove(trgLbl, i)
     array.remove(trgPrevRT, i)
+    array.remove(trgStartT, i)
     array.remove(trgRsiEv, i)
     array.remove(trgLiqEv, i)
     array.remove(trgAbsEv, i)
@@ -767,6 +769,7 @@ trgClear() =>
     array.clear(trgConfExp)
     array.clear(trgLbl)
     array.clear(trgPrevRT)
+    array.clear(trgStartT)
     array.clear(trgRsiEv)
     array.clear(trgLiqEv)
     array.clear(trgAbsEv)
@@ -1063,7 +1066,7 @@ if useAbs
                 array.push(absVolHist, v)
                 if array.size(absVolHist) > absRelLen
                     array.shift(absVolHist)
-    while array.size(bpT) > 0 and array.get(bpT, 0) < time - (absWindow + 5) * 60000
+    while array.size(bpT) > 0 and array.get(bpT, 0) < time - (math.max(absWindow, closeWait) + 5) * 60000
         array.shift(bpT)
         array.shift(bpLo)
         array.shift(bpHi)
@@ -1074,12 +1077,12 @@ if useAbs
 // Long -> big trade de VENDA; short -> big trade de COMPRA; vela do print a
 // tocar [zoneLo - tol, zoneHi + tol]; nos últimos absWindow minutos (só prints
 // já fechados até ao fim desse minuto).
-absCheck(bool lg, int mT, float zLo_, float zHi_) =>
+absCheck(bool lg, int tFrom, int mT, float zLo_, float zHi_) =>
     float tol = absTolMode == "ATR" ? (na(absAtr) ? 0.0 : absAtr * absAtrMult) : (zLo_ + zHi_) / 2 * absTolPct / 100
     bandLo = zLo_ - tol
     bandHi = zHi_ + tol
     tEnd = mT + 60000
-    tStart = tEnd - absWindow * 60000
+    tStart = tFrom
     float best = 0.0
     n = array.size(bpT)
     if n > 0
@@ -1206,6 +1209,7 @@ if useTrig
                         array.push(trgConfExp, mT + rsiWindow * 60000)
                         array.push(trgLbl, "")
                         array.push(trgPrevRT, false)
+                        array.push(trgStartT, mT)
                         array.push(trgRsiEv, false)
                         array.push(trgLiqEv, false)
                         array.push(trgAbsEv, false)
@@ -1228,7 +1232,10 @@ if useTrig
                         lg = array.get(trgLong, i)
                         [rsiOk0, rsiLbl] = rsiCheck(lg)
                         [liqOk0, liqLbl] = liqCheck(lg, mT)
-                        [absOk0, absLbl] = absCheck(lg, mT, array.get(trgLo, i), array.get(trgHi, i))
+                        // Modelo novo: sem janela de tempo - qualquer big trade na zona
+                        // desde o minuto do toque. Modelo antigo: janela 'absWindow'.
+                        tFromA = newEntry ? array.get(trgStartT, i) : mT + 60000 - absWindow * 60000
+                        [absOk0, absLbl] = absCheck(lg, tFromA, mT, array.get(trgLo, i), array.get(trgHi, i))
                         if rsiOk0
                             array.set(trgRsiEv, i, true)
                         if liqOk0
@@ -1554,7 +1561,7 @@ if array.size(newIds) > 0
         if useConfirm and preLimit and flat and not newEntry
             [rOk0, rLbl0] = rsiCheck(isLong)
             [lOk0, lLbl0] = liqCheck(isLong, lastStepT)
-            [aOk0, aLbl0] = absCheck(isLong, lastStepT, array.get(newLo, i), array.get(newHi, i))
+            [aOk0, aLbl0] = absCheck(isLong, lastStepT + 60000 - absWindow * 60000, lastStepT, array.get(newLo, i), array.get(newHi, i))
             if (not useRsi or rOk0) and (not useLiq or lOk0) and (not useAbs or aOk0)
                 placeLimit := true
                 cmt := " LIM" + (useRsi ? " RSI" + rLbl0 : "") + (useLiq ? " LIQ" + lLbl0 : "") + (useAbs ? aLbl0 : "")
