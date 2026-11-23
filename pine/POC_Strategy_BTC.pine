@@ -208,9 +208,19 @@ absMin     = input.float(20, "Absolute: minimum size", minval = 0.0, group = grp
 absUnits   = input.string("BTC", "Absolute: units", options = ["BTC", "USDT"], group = grpAbs, active = absSizeMode == "Absolute")
 absShowBubbles = input.bool(true, "Show big trade bubbles", group = grpAbs,
      tooltip = "Desenha no gráfico os big trades que a estratégia deteta (verde = compra, roxo = venda). O TradingView guarda no máximo 500 etiquetas, por isso só as mais recentes ficam visíveis.")
-absShowText = input.bool(true, "Show size on bubbles", group = grpAbs)
-absBuyColor  = input.color(color.new(#00c853, 40), "Buy bubble color", group = grpAbs)
-absSellColor = input.color(color.new(#7e57c2, 40), "Sell bubble color", group = grpAbs)
+grpBub = "Big trade bubbles (aspeto igual ao indicador Big Trades)"
+bubMarker    = input.string("Circle", "Marker", options = ["Circle", "Square", "Diamond", "Text"], group = grpBub)
+bubHollow    = input.bool(false, "Hollow fill", group = grpBub)
+bubShowText  = input.bool(true, "Show text", group = grpBub)
+bubStdevMult = input.float(2.5, "Standard Dev.", minval = 0.1, step = 0.1, group = grpBub)
+bubMinPx     = input.float(0.20, "Minimum size", minval = 0.01, step = 0.05, group = grpBub)
+bubMaxPx     = input.float(2.00, "Maximum size", minval = 0.01, step = 0.05, group = grpBub)
+bubMinOp     = input.int(10, "Minimum opacity", minval = 0, maxval = 100, group = grpBub)
+bubMaxOp     = input.int(40, "Maximum opacity", minval = 0, maxval = 100, group = grpBub)
+bubAskColor  = input.color(color.new(#00c853, 0), "Buy bubble color (Ask)", group = grpBub)
+bubBidColor  = input.color(color.new(#7e57c2, 0), "Sell bubble color (Bid)", group = grpBub)
+bubTextSize  = input.int(12, "Text size", minval = 6, maxval = 48, group = grpBub)
+bubTextColor = input.color(color.white, "Text color (trade size number)", group = grpBub)
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -909,6 +919,18 @@ var array<float> bpHi   = array.new<float>()
 var array<bool>  bpSell = array.new<bool>()
 var array<float> bpSize = array.new<float>()
 var array<float> absVolHist = array.new<float>()
+// Estatística dos tamanhos (log) - igual ao indicador Big Trades, só para o
+// tamanho/opacidade das bolhas.
+var array<float> bubLogSizes = array.new<float>()
+bubHaveStats = array.size(bubLogSizes) >= 100
+bubLogMean   = bubHaveStats ? array.avg(bubLogSizes) : na
+bubLogStdev  = bubHaveStats ? array.stdev(bubLogSizes) : na
+bubLabelStyle() =>
+    bubMarker == "Circle" ? label.style_circle : bubMarker == "Square" ? label.style_square : bubMarker == "Diamond" ? label.style_diamond : label.style_label_center
+bubBucketSize(float px) =>
+    px < 8 ? size.tiny : px < 14 ? size.small : px < 20 ? size.normal : px < 28 ? size.large : size.huge
+bubBucketTextSize(float px) =>
+    px < 14.4 ? size.tiny : px < 22.8 ? size.small : px < 31.2 ? size.normal : px < 39.6 ? size.large : size.huge
 var int absLastT = 0
 
 float absAtr = na
@@ -925,6 +947,9 @@ if useAbs
                 absLastT := t
                 v = array.get(pV, i)
                 c = array.get(pC, i)
+                array.push(bubLogSizes, math.log(v + 1))
+                if array.size(bubLogSizes) > 2000
+                    array.shift(bubLogSizes)
                 float avgPrev = array.size(absVolHist) >= 10 ? array.avg(absVolHist) : na
                 bool big = absSizeMode == "Relative" ? (not na(avgPrev) and avgPrev > 0 and v >= absRelMult * avgPrev) : ((absUnits == "USDT" ? v * c : v) >= absMin)
                 if big
@@ -935,11 +960,27 @@ if useAbs
                     array.push(bpSell, isSellP)
                     array.push(bpSize, v)
                     if absShowBubbles
-                        ratio = na(avgPrev) or avgPrev <= 0 ? 5.0 : v / avgPrev
-                        bSize = ratio < 4 ? size.tiny : ratio < 8 ? size.small : ratio < 15 ? size.normal : size.large
-                        label.new(t, c, absShowText ? str.tostring(v, "#.#") : "", xloc = xloc.bar_time,
-                             style = label.style_circle, size = bSize, color = isSellP ? absSellColor : absBuyColor,
-                             textcolor = color.white)
+                        // Mesmo desenho do indicador Big Trades: bolha sem texto +
+                        // número centrado por cima (fundo transparente).
+                        float z = bubHaveStats and bubLogStdev > 0 ? (math.log(v + 1) - bubLogMean) / bubLogStdev : na
+                        float sizeNorm = na(z) ? 0.5 : math.max(0.0, math.min(1.0, z / bubStdevMult))
+                        int opacityPct = int(math.round(bubMinOp + sizeNorm * (bubMaxOp - bubMinOp)))
+                        color baseColor = isSellP ? bubBidColor : bubAskColor
+                        color fillColor = bubHollow ? color.new(baseColor, 100) : color.new(baseColor, 100 - math.max(0, math.min(100, opacityPct)))
+                        float pxLo = math.max(2.0, bubMinPx * 5)
+                        float pxHi = math.max(pxLo + 0.5, bubMaxPx * 5)
+                        string lblSize = bubBucketSize(pxLo + sizeNorm * (pxHi - pxLo))
+                        string txtLblSize = bubBucketTextSize(bubTextSize)
+                        string txt = (bubShowText or bubMarker == "Text") ? str.tostring(v, "#") : ""
+                        if bubMarker == "Text"
+                            label.new(bar_index, c, text = txt, style = label.style_label_center, size = txtLblSize,
+                                 color = color.new(color.black, 100), textcolor = bubTextColor)
+                        else
+                            label.new(bar_index, c, text = "", style = bubLabelStyle(), size = lblSize,
+                                 color = fillColor, textcolor = bubTextColor)
+                            if txt != ""
+                                label.new(bar_index, c, text = txt, style = label.style_label_center, size = txtLblSize,
+                                     color = color.new(color.black, 100), textcolor = bubTextColor)
                 array.push(absVolHist, v)
                 if array.size(absVolHist) > absRelLen
                     array.shift(absVolHist)
