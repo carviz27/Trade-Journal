@@ -235,8 +235,13 @@ closeWait = input.int(30, "Max minutes to wait for the close beyond the zone", m
 slBufferPct = input.float(0.0, "Stop buffer % (below the low / above the high)", minval = 0.0, step = 0.01, group = grpEntry)
 bounceBeyond = input.bool(true, "Bounce candle must close beyond the zone", group = grpEntry,
      tooltip = "Padrão de entrada (long): uma vela de 1m VERMELHA toca a zona (pode deixar wick) e a vela SEGUINTE fecha VERDE -> entrada. ON: essa vela verde também tem de fechar acima do topo da zona. Short: vela VERDE toca a zona e a seguinte fecha VERMELHA (abaixo da zona, se ON). Uma vela que toca e fecha logo do outro lado NÃO dá entrada.")
-zoneBufPct = input.float(0.1, "Zone buffer % (above and below)", minval = 0.0, step = 0.01, group = grpEntry,
-     tooltip = "Alarga a zona de POCs esta % para cima e para baixo. O toque, o fecho para lá da zona e o desenho das caixas usam a zona alargada. 0 = sem buffer.")
+grpBuf = "Zone buffer % (alarga a zona de POCs)"
+bufLongUp   = input.float(0.1, "Long zones: above %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufL",
+     tooltip = "Zonas de LONG (abaixo do preço): quanto a zona sobe acima do topo / desce abaixo do fundo. O toque, o fecho para lá da zona e as caixas usam a zona alargada. 0 = sem buffer desse lado.")
+bufLongDn   = input.float(0.1, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufL")
+bufShortUp  = input.float(0.1, "Short zones: above %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS",
+     tooltip = "Zonas de SHORT (acima do preço): quanto a zona sobe acima do topo / desce abaixo do fundo.")
+bufShortDn  = input.float(0.1, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS")
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -1337,6 +1342,15 @@ if nCand > 0
     array.push(zCnt, curCnt)
     array.push(zMem, curMem)
 
+// Zona alargada pelo buffer do seu lado: zona abaixo do preço = long, acima =
+// short (decidido pela zona sem buffer). Devolve [lo, hi].
+zoneBuffered(float rawLo, float rawHi) =>
+    isL = rawHi < close
+    isS = rawLo > close
+    upP = isL ? bufLongUp : isS ? bufShortUp : math.max(bufLongUp, bufShortUp)
+    dnP = isL ? bufLongDn : isS ? bufShortDn : math.max(bufLongDn, bufShortDn)
+    [rawLo * (1 - dnP / 100), rawHi * (1 + upP / 100)]
+
 // 4) Uma ordem por zona elegível - só quando NÃO há posição aberta.
 flat = strategy.position_size == 0 and not enteredNow
 newIds = array.new<string>()
@@ -1353,13 +1367,14 @@ newCnt = array.new<int>()
 nZones = array.size(zLo)
 if nZones > 0 and flat
     for z = 0 to nZones - 1
-        // Zona alargada pelo buffer (para cima e para baixo).
-        lo  = array.get(zLo, z) * (1 - zoneBufPct / 100)
-        hi  = array.get(zHi, z) * (1 + zoneBufPct / 100)
+        // Zona alargada pelo buffer do seu lado (long/short, cima/baixo).
+        rawLo = array.get(zLo, z)
+        rawHi = array.get(zHi, z)
+        [lo, hi] = zoneBuffered(rawLo, rawHi)
         cnt = array.get(zCnt, z)
         inside = close >= lo and close <= hi
         if cnt >= minPocsZone and not inside
-            isLong = hi < close
+            isLong = rawHi < close
             entryPx = entryMode == "Zone middle" ? (lo + hi) / 2 : (isLong ? hi : lo)
             zid = "Z|" + str.tostring(lo, format.mintick) + "-" + str.tostring(hi, format.mintick) + "|" + str.tostring(cnt)
             if ((isLong and allowLong) or (not isLong and allowShort)) and not map.contains(traded, zid) and not array.includes(newBase, zid)
@@ -1555,9 +1570,10 @@ if barstate.islast
         for z = 0 to nZones - 1
             cnt = array.get(zCnt, z)
             if cnt >= minPocsZone
-                lo = array.get(zLo, z) * (1 - zoneBufPct / 100)
-                hi = array.get(zHi, z) * (1 + zoneBufPct / 100)
-                col = hi < close ? color.new(color.teal, 80) : lo > close ? color.new(color.red, 80) : color.new(color.orange, 80)
+                rawLo = array.get(zLo, z)
+                rawHi = array.get(zHi, z)
+                [lo, hi] = zoneBuffered(rawLo, rawHi)
+                col = rawHi < close ? color.new(color.teal, 80) : rawLo > close ? color.new(color.red, 80) : color.new(color.orange, 80)
                 array.push(zoneBoxes, box.new(bar_index - 30, hi, bar_index + 10, lo, border_color = color.new(col, 40),
                      bgcolor = col, extend = extend.right, text = str.tostring(cnt) + " POC" + (cnt > 1 ? "s" : ""),
                      text_color = color.gray, text_size = size.small, text_halign = text.align_right))
