@@ -1298,8 +1298,16 @@ if useTrig
                             map.put(filled, eid, true)
                             map.put(fillCnt, b, (map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0) + 1)
                             lockKey(b, array.get(trgEntry, i))
+                            // Bloqueia só os POCs da zona que o preço JÁ TOCOU até
+                            // à entrada (short: POCs <= high desde o toque; long:
+                            // POCs >= low). Os restantes continuam a formar zona
+                            // e podem ser jogados (ex.: depois de um SL).
+                            extLock = array.get(trgExt, i)
                             for m in str.split(array.get(trgMem, i), ";")
-                                lockKey(m, str.tonumber(str.substring(m, 2)))
+                                mp = str.tonumber(str.substring(m, 2))
+                                bool reached = not newEntry or (lg ? mp >= extLock : mp <= extLock)
+                                if reached
+                                    lockKey(m, mp)
                             needSel := true
                             enteredNow := true
             // Guarda, para o minuto seguinte, se ESTA vela foi vermelha (long) /
