@@ -122,7 +122,7 @@ reuseTouched = input.bool(true, "Re-use touched POCs", group = grpStrat,
 rearmPct = input.float(0.5, "Re-arm distance %", minval = 0.0, step = 0.05, group = grpStrat,
      tooltip = "Distância a que o preço tem de se afastar de um POC já negociado para ele voltar a receber ordem. Evita entrar várias vezes seguidas no mesmo toque.")
 slPct = input.float(1.0, "Stop loss % beyond zone ('At zone') / zone invalidation", minval = 0.0, step = 0.1, group = grpStrat,
-     tooltip = "O stop fica esta % para lá da extremidade OPOSTA da zona. 0 = sem stop loss.")
+     tooltip = "Modelo 'At zone': o stop fica esta % para lá da extremidade OPOSTA da zona. Modelo 'Close beyond zone (1m)': o stop é o low/high do bounce, e esta % só serve para INVALIDAR o sinal se o preço romper a zona até aqui. 0 = sem stop loss / sem invalidação.")
 tpPct = input.float(2.0, "Take profit % (only 'At zone' model)", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "Só usado no modelo de entrada 'At zone'. No modelo 'Close beyond zone (1m)' o TP é por risk:reward - ver 'Take profit R:R' no grupo 'Entry model'. 0 = sem take profit.")
 showDiag = input.bool(true, "Diagnostic table", group = grpStrat,
      tooltip = "Mostra no canto inferior direito o estado dos filtros na última vela: zonas armadas, sinais à espera, RSI e a maior vela de liquidações (longs/shorts) - para perceber porque é que uma trade não abriu.")
