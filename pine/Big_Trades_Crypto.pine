@@ -36,8 +36,6 @@ lowerTF       = input.timeframe("1", "Input data (intrabar resolution, manual)",
 filterMin     = input.float(100, "Filter Min.", minval=0, step=1, group=grpData,
      tooltip="Absolute volume value — calibrate it by watching the actual print sizes for your specific symbol/exchange/timeframe first (there is no universal default across crypto pairs).")
 filterMax     = input.float(0, "Filter Max. (0 = no limit)", minval=0, step=1, group=grpData)
-intrabarCount = input.int(100000, "Intrabar bars to load", minval=1000, maxval=200000, step=1000, group=grpData,
-     tooltip="Máximo de velas intrabar carregadas: 100.000 (Basic a Premium), 125.000 (Expert), 200.000 (Ultimate). Contam a partir de HOJE: 5S cobre ~5.8 dias, 15S ~17 dias, 1m ~69 dias. No Bar Replay mais antigo do que isso não há dados intrabar.")
 
 // -----------------------------------------------------------------------------
 // PLOT SETTINGS
@@ -169,10 +167,7 @@ if maxSec == 0
 effSec = math.min(wantSec, maxSec)
 effectiveTF = effSec <= 1 ? "1S" : effSec <= 5 ? "5S" : effSec <= 15 ? "15S" : effSec <= 30 ? "30S" : effSec <= 60 ? "1" : effSec <= 300 ? "5" : effSec <= 900 ? "15" : effSec <= 1800 ? "30" : "60"
 
-// calc_bars_count: sem isto o TradingView só carrega tantas velas intrabar
-// como velas do gráfico (ex.: ~1 dia de velas de 1S/5S), e no Bar Replay de
-// datas mais antigas não aparecia nenhuma bolha.
-[iOpen, iHigh, iLow, iClose, iVolume] = request.security_lower_tf(syminfo.tickerid, effectiveTF, [open, high, low, close, volume], calc_bars_count = intrabarCount)
+[iOpen, iHigh, iLow, iClose, iVolume] = request.security_lower_tf(syminfo.tickerid, effectiveTF, [open, high, low, close, volume])
 
 bodyHi = math.max(open, close)
 bodyLo = math.min(open, close)
