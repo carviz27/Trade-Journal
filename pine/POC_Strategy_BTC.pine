@@ -1307,7 +1307,8 @@ if useTrig
             if not enteredNow and array.size(trgBase) > 0
                 for i = 0 to array.size(trgBase) - 1
                     lg = array.get(trgLong, i)
-                    touchesNow = lg ? mL <= array.get(trgHi, i) : mH >= array.get(trgLo, i)
+                    // A vela de toque tem de chegar ao POC (não basta o buffer).
+                    touchesNow = lg ? mL <= array.get(trgEntry, i) : mH >= array.get(trgEntry, i)
                     bool touchCandle = touchesNow and (lg ? mC < mO : mC > mO)
                     array.set(trgPrevRT, i, bouncePattern == "Relaxed" ? (array.get(trgPrevRT, i) or touchCandle) : touchCandle)
     if enteredNow
@@ -1468,7 +1469,10 @@ if nZones > 0 and flat
         // preço lá dentro. Modelo antigo (ordens limit): continua a não armar
         // zonas com o preço dentro.
         if cnt >= minPocsZone and (newEntry or not inside)
-            entryPx = entryMode == "Zone middle" ? (lo + hi) / 2 : (isLong ? hi : lo)
+            // Nível de toque/entrada = o POC (zona SEM buffer): o POC mais
+            // próximo do preço (ou o meio da zona). O buffer só conta para o
+            // fecho para lá da zona, a invalidação e a absorção.
+            entryPx = entryMode == "Zone middle" ? (rawLo + rawHi) / 2 : (isLong ? rawHi : rawLo)
             zid = "Z|" + str.tostring(lo, format.mintick) + "-" + str.tostring(hi, format.mintick) + "|" + str.tostring(cnt)
             if ((isLong and allowLong) or (not isLong and allowShort)) and not map.contains(traded, zid) and not array.includes(newBase, zid)
                 farEdge = isLong ? lo : hi
