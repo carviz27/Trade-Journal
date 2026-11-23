@@ -243,6 +243,11 @@ bufShortUp  = input.float(0.1, "Short zones: above %", minval = 0.0, step = 0.01
      tooltip = "Zonas de SHORT (acima do preço): quanto a zona sobe acima do topo / desce abaixo do fundo.")
 bufShortDn  = input.float(0.1, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS")
 
+grpDiv = "Divergence re-entry"
+useDiv = input.bool(true, "Re-entry on RSI divergence after SL", group = grpDiv,
+     tooltip = "Se uma trade (modelo 'Close beyond zone') levar SL, a zona fica ativa à espera de uma divergência: SHORT = preço faz HIGHER HIGH e o RSI faz LOWER HIGH face ao pico do 1.º movimento (do toque até ao SL); LONG = lower low no preço e higher low no RSI. Depois entra com o mesmo padrão de bounce (sem precisar de RSI overbought/oversold, liquidações nem absorção). Invalida se o RSI passar o pico do 1.º movimento, se o preço romper a zona até ao 'Stop loss %' ou se passar o tempo máximo. Só uma vez por zona. Exige o filtro RSI ligado (usa o RSI do timeframe ligado mais baixo).")
+divWait = input.int(25, "Max minutes to wait for the divergence", minval = 1, maxval = 600, group = grpDiv)
+
 // ---------------------------------------------------------------------------
 // Só BTC
 // ---------------------------------------------------------------------------
@@ -718,6 +723,7 @@ var array<bool>   trgConf  = array.new<bool>()    // filtros já confirmaram?
 var array<int>    trgConfExp = array.new<int>()   // limite para os filtros confirmarem
 var array<string> trgLbl   = array.new<string>()  // texto dos filtros que confirmaram
 var array<bool>   trgPrevRT = array.new<bool>()   // vela anterior: vermelha (long) / verde (short) a tocar a zona
+var array<float>  trgRsiExt = array.new<float>()  // pico (short) / vale (long) do RSI desde o toque
 var map<string, float> slById = map.new<string, float>()
 
 trgRemove(int i) =>
@@ -735,6 +741,7 @@ trgRemove(int i) =>
     array.remove(trgConfExp, i)
     array.remove(trgLbl, i)
     array.remove(trgPrevRT, i)
+    array.remove(trgRsiExt, i)
 
 trgClear() =>
     array.clear(trgBase)
@@ -751,6 +758,7 @@ trgClear() =>
     array.clear(trgConfExp)
     array.clear(trgLbl)
     array.clear(trgPrevRT)
+    array.clear(trgRsiExt)
 
 // Filtro RSI multi-timeframe. Os passos de avaliação são velas de 1 minuto
 // (as da barra do gráfico via request.security_lower_tf, ou a própria barra
@@ -1114,7 +1122,15 @@ if strategy.opentrades > 0
         array.push(execIds, strategy.opentrades.entry_id(t))
 if strategy.closedtrades > lastClosedCount
     for t = lastClosedCount to strategy.closedtrades - 1
-        array.push(execIds, strategy.closedtrades.entry_id(t))
+        cid = strategy.closedtrades.entry_id(t)
+        array.push(execIds, cid)
+        // A trade seguida (modelo novo) fechou: foi por SL? (saída no preço do
+        // stop original e com prejuízo; um BE sai no preço de entrada).
+        if tActive and cid == tId
+            tClosing := true
+            float slOrig = map.contains(slById, cid) ? map.get(slById, cid) : na
+            xPx = strategy.closedtrades.exit_price(t)
+            tSLHit := not na(slOrig) and strategy.closedtrades.profit(t) < 0 and math.abs(xPx - slOrig) / slOrig < 0.001
     lastClosedCount := strategy.closedtrades
 
 // 1) Ordens da barra anterior que foram executadas -> bloqueia a zona e
@@ -1152,6 +1168,42 @@ if reuseTouched and array.size(lockKeys) > 0
 //     seguinte).
 //     Modelo "At zone": entra a mercado quando os filtros confirmam (como
 //     antes), stop % para lá da zona, TP %.
+// ---------------------------------------------------------------------------
+// Divergência após SL: estado
+// ---------------------------------------------------------------------------
+dvIdx = rsi1On ? 0 : rsi5On ? 1 : rsi15On ? 2 : 3
+// Trade do modelo novo a ser seguida (para saber o pico do 1.º movimento).
+var bool   tActive = false
+var string tId = ""
+var bool   tLong = false
+var bool   tIsDiv = false
+var float  tRefPx = na       // high (short) / low (long) do toque até à saída
+var float  tRefRsi = na      // pico do RSI (short) / vale (long) no mesmo período
+var float  tZLo = na
+var float  tZHi = na
+var float  tZSL = na         // nível de invalidação da zona (Stop loss % para lá da zona)
+var string tBase = ""
+var string tMem = ""
+var int    tCnt = 1
+var bool   tClosing = false
+var bool   tSLHit = false
+// Divergência à espera.
+var bool   dvActive = false
+var bool   dvLong = false
+var float  dvRefPx = na
+var float  dvRefRsi = na
+var float  dvZLo = na
+var float  dvZHi = na
+var float  dvZSL = na
+var int    dvExp = 0
+var bool   dvHH = false      // já fez higher high (short) / lower low (long)?
+var float  dvExt = na        // extremo do preço desde o SL (para o stop)
+var bool   dvPrevRT = false
+var string dvBase = ""
+var string dvMem = ""
+var int    dvCnt = 1
+var int    dvStartBar = 0
+
 enteredNow = false
 if useTrig
     nMin = array.size(m1H)
@@ -1164,6 +1216,12 @@ if useTrig
             if useRsi
                 rsiFeed(array.get(m1T, k), mC)
             mT = array.get(m1T, k)
+            float rNow = useRsi ? array.get(curRsi, dvIdx) : na
+            // Trade seguida: continua a acompanhar o pico do movimento até sair.
+            if tActive
+                tRefPx := tLong ? math.min(tRefPx, mL) : math.max(tRefPx, mH)
+                if not na(rNow)
+                    tRefRsi := na(tRefRsi) ? rNow : tLong ? math.min(tRefRsi, rNow) : math.max(tRefRsi, rNow)
             // Toques nas zonas armadas -> novos sinais.
             if not enteredNow and array.size(pendBase) > 0
                 for i = 0 to array.size(pendBase) - 1
@@ -1186,12 +1244,16 @@ if useTrig
                         array.push(trgConfExp, mT + rsiWindow * 60000)
                         array.push(trgLbl, "")
                         array.push(trgPrevRT, false)
+                        array.push(trgRsiExt, float(na))
             // Atualiza o low/high do bounce; expira sinais antigos ou cuja
             // zona foi rompida até ao stop % da zona.
             if array.size(trgBase) > 0
                 for i = array.size(trgBase) - 1 to 0
                     lg = array.get(trgLong, i)
                     array.set(trgExt, i, lg ? math.min(array.get(trgExt, i), mL) : math.max(array.get(trgExt, i), mH))
+                    if not na(rNow)
+                        rx = array.get(trgRsiExt, i)
+                        array.set(trgRsiExt, i, na(rx) ? rNow : lg ? math.min(rx, rNow) : math.max(rx, rNow))
                     sl = array.get(trgSL, i)
                     broken = not na(sl) and (lg ? mL <= sl : mH >= sl)
                     if mT > array.get(trgExp, i) or broken
@@ -1248,6 +1310,65 @@ if useTrig
                                 lockKey(m, str.tonumber(str.substring(m, 2)))
                             needSel := true
                             enteredNow := true
+                            if newEntry
+                                tActive := true
+                                tId := eid
+                                tLong := lg
+                                tIsDiv := false
+                                tRefPx := array.get(trgExt, i)
+                                tRefRsi := array.get(trgRsiExt, i)
+                                tZLo := array.get(trgLo, i)
+                                tZHi := array.get(trgHi, i)
+                                tZSL := array.get(trgSL, i)
+                                tBase := b
+                                tMem := array.get(trgMem, i)
+                                tCnt := cnt
+                                tClosing := false
+                                tSLHit := false
+            // Divergência: depois de um SL, espera por higher high + lower high
+            // no RSI (short) / lower low + higher low (long) e entra com o
+            // mesmo padrão de bounce.
+            if dvActive and not enteredNow
+                bool dvKill = mT > dvExp
+                if not na(rNow) and (dvLong ? rNow < dvRefRsi : rNow > dvRefRsi)
+                    dvKill := true   // RSI passou o 1.º pico -> divergência quebrada
+                if not na(dvZSL) and (dvLong ? mL <= dvZSL : mH >= dvZSL)
+                    dvKill := true   // zona rompida
+                if dvKill
+                    dvActive := false
+                else
+                    dvExt := na(dvExt) ? (dvLong ? mL : mH) : dvLong ? math.min(dvExt, mL) : math.max(dvExt, mH)
+                    if dvLong ? mL < dvRefPx : mH > dvRefPx
+                        dvHH := true
+                    if dvHH and strategy.position_size == 0 and inWindow
+                        bool bounceC = dvLong ? mC > mO : mC < mO
+                        bool beyondC = not bounceBeyond or (dvLong ? mC > dvZHi : mC < dvZLo)
+                        float dsl = dvLong ? dvExt * (1 - slBufferPct / 100) : dvExt * (1 + slBufferPct / 100)
+                        if dvPrevRT and bounceC and beyondC and (dvLong ? dsl < mC : dsl > mC)
+                            float dtp = dvLong ? mC + rrMult * (mC - dsl) : mC - rrMult * (dsl - mC)
+                            deid = dvBase + "#D" + str.tostring(map.contains(fillCnt, dvBase) ? map.get(fillCnt, dvBase) : 0)
+                            dmult = sizeByCount ? math.min(dvCnt, maxSizeMult) : 1
+                            strategy.entry(deid, dvLong ? strategy.long : strategy.short, qty = strategy.equity * basePct / 100 * dmult / mC,
+                                 comment = (dvLong ? "L " : "S ") + deid + " DIV RSI " + str.tostring(rNow, "#") + "<" + str.tostring(dvRefRsi, "#"))
+                            strategy.exit("X|" + deid, from_entry = deid, stop = dsl, limit = dtp, comment_loss = "SL", comment_profit = "TP")
+                            map.put(tpById, deid, dtp)
+                            map.put(slById, deid, dsl)
+                            map.put(filled, deid, true)
+                            map.put(fillCnt, dvBase, (map.contains(fillCnt, dvBase) ? map.get(fillCnt, dvBase) : 0) + 1)
+                            enteredNow := true
+                            dvActive := false
+                            // Segue esta trade, mas um SL dela já não arma outra divergência.
+                            tActive := true
+                            tId := deid
+                            tLong := dvLong
+                            tIsDiv := true
+                            tRefPx := dvExt
+                            tRefRsi := rNow
+                            tClosing := false
+                            tSLHit := false
+                    if dvActive
+                        touchesD = dvLong ? mL <= dvZHi : mH >= dvZLo
+                        dvPrevRT := touchesD and (dvLong ? mC < mO : mC > mO)
             // Guarda, para o minuto seguinte, se ESTA vela foi vermelha (long) /
             // verde (short) e tocou a zona.
             if not enteredNow and array.size(trgBase) > 0
@@ -1257,6 +1378,27 @@ if useTrig
                     array.set(trgPrevRT, i, touchesNow and (lg ? mC < mO : mC > mO))
     if enteredNow
         trgClear()
+
+if tClosing
+    if tSLHit and not tIsDiv and useDiv and useRsi and newEntry and not na(tRefRsi)
+        dvActive := true
+        dvLong := tLong
+        dvRefPx := tRefPx
+        dvRefRsi := tRefRsi
+        dvZLo := tZLo
+        dvZHi := tZHi
+        dvZSL := tZSL
+        dvExp := time + divWait * 60000
+        dvHH := false
+        dvExt := na
+        dvPrevRT := false
+        dvBase := tBase
+        dvMem := tMem
+        dvCnt := tCnt
+        dvStartBar := bar_index
+    tActive := false
+    tClosing := false
+    tSLHit := false
 
 // 2) POCs candidatos: em cada timeframe junta TODOS os POCs (New + Naked +
 //    Tapped, sem distinção), tira os preços já usados e fica com os N mais
@@ -1583,6 +1725,18 @@ if barstate.islast and showDiag
 if barstate.islast and useLiq and not lqGotData
     var table lqWarn = table.new(position.bottom_right, 1, 1, bgcolor = color.new(color.red, 20))
     table.cell(lqWarn, 0, 0, "Sem dados de liquidações para " + lqLongTicker + " / " + lqShortTicker + " (ver 'Liquidations filter')", text_color = color.white, text_size = size.small)
+
+// Zona à espera de divergência (só na última barra).
+var box dvBox = na
+if barstate.islast
+    if not na(dvBox)
+        box.delete(dvBox)
+        dvBox := na
+    if dvActive and showZones
+        dvCol = dvLong ? color.new(color.teal, 70) : color.new(color.red, 70)
+        dvBox := box.new(dvStartBar, dvZHi, bar_index + 10, dvZLo, border_color = color.new(dvCol, 20), bgcolor = dvCol,
+             border_style = line.style_dashed, text = "DIV? RSI ref " + str.tostring(dvRefRsi, "#") + " / " + str.tostring(dvRefPx, format.mintick),
+             text_color = color.gray, text_size = size.small, text_halign = text.align_right)
 
 // Desenho das zonas (só na última barra).
 var array<box> zoneBoxes = array.new<box>()
