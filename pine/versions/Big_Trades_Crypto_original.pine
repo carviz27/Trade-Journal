@@ -1,0 +1,283 @@
+//@version=5
+indicator("Big Trades [Crypto]", shorttitle="Big Trades", overlay=true, max_labels_count=500, max_boxes_count=500)
+
+// =============================================================================
+// Big Trades [Crypto]
+// -----------------------------------------------------------------------------
+// Crypto symbols on TradingView already carry REAL trade volume (not tick
+// volume — tick volume only applies to forex/CFDs where no true volume
+// exists). The limitation isn't the volume data itself, it's granularity:
+// Pine Script has no feed of raw individual trade prints (each single
+// execution with its own size + aggressor side), only volume aggregated per
+// bar. This indicator narrows that aggregation window using
+// request.security_lower_tf(): every lower-timeframe candle inside the
+// current chart bar is treated as one "print" — its (real) volume is the
+// trade size, and its direction (close vs open) approximates the aggressor
+// side (up = ask/buy, down = bid/sell).
+//
+// request.security_lower_tf() can only return ~100,000 intrabars in total,
+// so a fine resolution (e.g. "1S") can only reach back ~1 real day no matter
+// what "Days to load" is set to. "Auto resolution" picks a coarser intrabar
+// resolution automatically as "Days to load" grows, so the requested
+// history depth is actually reachable — off by default (manual "Input
+// data" resolution applies as-is).
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// DATA SETTINGS
+// -----------------------------------------------------------------------------
+grpData       = "Data Settings"
+daysToLoad    = input.int(10, "Days to load", minval=1, maxval=365, group=grpData,
+     tooltip="Only prints/zones from the last N days (relative to now) are drawn on the chart. See \"Auto resolution\" below — at very fine resolutions Pine cannot actually reach back this many days no matter what this is set to.")
+autoResolution = input.bool(false, "Auto resolution (fit Days to load)", group=grpData,
+     tooltip="request.security_lower_tf() has a hard cap on how many intrabars it can return in total (~100,000). At \"1S\" that only covers ~1 day of real history, however large \"Days to load\" is set — the extra days are silently unreachable. When ON, the actual intrabar resolution below is ignored and one is picked automatically (coarser for a larger Days to load) so the requested history is actually reachable. Turn OFF to force the manual resolution below and accept that Days to load may then be capped.")
+lowerTF       = input.timeframe("1S", "Input data (intrabar resolution, manual)", group=grpData,
+     tooltip="Only used when \"Auto resolution\" is off. Real trade volume, aggregated per lower-timeframe candle, is used as a proxy for individual trades. Must be lower than the chart timeframe. \"1S\" (1 second) requires a paid TradingView plan; use \"1\" (1 minute) on the free plan.")
+filterMin     = input.float(100, "Filter Min.", minval=0, step=1, group=grpData,
+     tooltip="Absolute volume value — calibrate it by watching the actual print sizes for your specific symbol/exchange/timeframe first (there is no universal default across crypto pairs).")
+filterMax     = input.float(0, "Filter Max. (0 = no limit)", minval=0, step=1, group=grpData)
+
+// -----------------------------------------------------------------------------
+// PLOT SETTINGS
+// -----------------------------------------------------------------------------
+grpPlot        = "Plot Settings"
+markerType     = input.string("Circle", "Marker", options=["Circle", "Square", "Diamond", "Text"], group=grpPlot)
+hollowFill     = input.bool(false, "Hollow fill", group=grpPlot)
+showText       = input.bool(true, "Show text", group=grpPlot)
+
+stdevMult      = input.float(2.5, "Standard Dev.", minval=0.1, step=0.1, group=grpPlot,
+     tooltip="Controls marker scaling between minimum and maximum size (recommended to keep default).")
+minMarkerPx    = input.float(0.20, "Minimum size", minval=0.01, step=0.05, group=grpPlot)
+maxMarkerPx    = input.float(2.00, "Maximum size", minval=0.01, step=0.05, group=grpPlot)
+
+minOpacityPct  = input.int(10, "Minimum opacity", minval=0, maxval=100, group=grpPlot)
+maxOpacityPct  = input.int(40, "Maximum opacity", minval=0, maxval=100, group=grpPlot)
+askColor       = input.color(color.new(#00c853, 0), "Buy bubble color (Ask)", group=grpPlot)
+bidColor       = input.color(color.new(#7e57c2, 0), "Sell bubble color (Bid)", group=grpPlot)
+
+plotOnlyInsideBar = input.bool(false, "Plot only inside bar", group=grpPlot,
+     tooltip="Text marker only: restrict the label to the candle's body range.")
+textSize       = input.int(12, "Text size", minval=6, maxval=48, group=grpPlot)
+textColor      = input.color(color.white, "Text color (trade size number)", group=grpPlot)
+
+// -----------------------------------------------------------------------------
+// ZONES SETTINGS
+// -----------------------------------------------------------------------------
+grpZones          = "Zones Settings"
+zonesEnable       = input.bool(false, "Enable", group=grpZones)
+biggestOnly       = input.bool(false, "Biggest only", group=grpZones, tooltip="Plot zones only for the largest qualifying trade of each bar.")
+shadowMode        = input.string("All", "Shadow mode", options=["All", "Reverse Only", "Trend Only", "None"], group=grpZones)
+bodyMode          = input.string("Trend Only", "Body mode", options=["All", "Reverse Only", "Trend Only", "None"], group=grpZones)
+zoneBidColor      = input.color(#7e57c2, "Bid Color", group=grpZones)
+zoneAskColor      = input.color(#00c853, "Ask Color", group=grpZones)
+zoneOpacityPct    = input.int(40, "Opacity", minval=0, maxval=100, group=grpZones)
+zoneBars          = input.int(10, "Number of bars", minval=1, maxval=500, group=grpZones)
+resetOnNewSession = input.bool(false, "Reset on new session", group=grpZones)
+triggerOnShadow   = input.bool(false, "Trigger on shadow", group=grpZones,
+     tooltip="Allow trades that occur in the candle's wick to open zones (in addition to whatever Shadow mode already allows).")
+
+// -----------------------------------------------------------------------------
+// ALERT SETTINGS
+// -----------------------------------------------------------------------------
+grpAlert      = "Alert Settings"
+alertOnAsk    = input.bool(true, "Alert on aggressive buyers", group=grpAlert)
+alertOnBid    = input.bool(true, "Alert on aggressive sellers", group=grpAlert)
+alertMinSize  = input.float(0, "Alert minimum size (0 = use active filter)", minval=0, group=grpAlert)
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+withinLoadWindow = time >= (timenow - daysToLoad * 86400000.0)
+
+f_transp(opacityPct) => 100 - math.max(0, math.min(100, opacityPct))
+
+f_labelStyle() =>
+    markerType == "Circle" ? label.style_circle : markerType == "Square" ? label.style_square : markerType == "Diamond" ? label.style_diamond : label.style_label_center
+
+f_bucketSize(px) =>
+    px < 8 ? size.tiny : px < 14 ? size.small : px < 20 ? size.normal : px < 28 ? size.large : size.huge
+
+// "Text size" ranges 6-48 — bucketed evenly across that actual range (not
+// f_bucketSize's bubble-tuned 8/14/20/28 thresholds, where most of 6-48
+// collapsed into a single "huge" bucket and small changes near the default
+// often didn't cross a boundary at all, making the input look like it did
+// nothing).
+f_bucketTextSize(px) =>
+    px < 14.4 ? size.tiny : px < 22.8 ? size.small : px < 31.2 ? size.normal : px < 39.6 ? size.large : size.huge
+
+f_zoneAllowed(isAsk, isBull, mode) =>
+    switch mode
+        "All"          => true
+        "None"         => false
+        "Trend Only"   => (isBull and isAsk) or (not isBull and not isAsk)
+        "Reverse Only" => (isBull and not isAsk) or (not isBull and isAsk)
+        => true
+
+// Rolling stats of LOG-transformed print sizes — used only to scale marker
+// size/opacity (z-score relative to recent prints), not for filtering.
+// Real trade/volume sizes are heavily right-skewed (many small prints,
+// occasional huge ones); log-space keeps the z-score meaningful despite
+// that skew.
+var logSizes = array.new_float(0)
+STAT_MAXLEN = 2000
+
+f_pushStat(v) =>
+    array.push(logSizes, math.log(v + 1))
+    if array.size(logSizes) > STAT_MAXLEN
+        array.shift(logSizes)
+
+haveStats = array.size(logSizes) >= 100
+logMean   = haveStats ? array.avg(logSizes) : na
+logStdev  = haveStats ? array.stdev(logSizes) : na
+
+f_zScore(sz) =>
+    haveStats and logStdev > 0 ? (math.log(sz + 1) - logMean) / logStdev : na
+
+f_passFilter(sz) =>
+    sz >= filterMin and (filterMax <= 0 or sz <= filterMax)
+
+// -----------------------------------------------------------------------------
+// Zones bookkeeping (needed for "Reset on new session")
+// -----------------------------------------------------------------------------
+var box[] zoneBoxes = array.new_box(0)
+newSession = timeframe.isintraday and dayofmonth(time) != dayofmonth(time[1])
+
+if resetOnNewSession and newSession and array.size(zoneBoxes) > 0
+    for i = array.size(zoneBoxes) - 1 to 0
+        box.delete(array.get(zoneBoxes, i))
+    array.clear(zoneBoxes)
+
+// -----------------------------------------------------------------------------
+// Intrabar data — the "aggregate trades" proxy feed
+// -----------------------------------------------------------------------------
+// Picks the finest resolution that can still cover "Days to load" within
+// request.security_lower_tf's total intrabar cap (kept at 90,000 as a safety
+// margin under the documented ~100,000 ceiling).
+autoSecPerBar = daysToLoad * 86400.0 / 90000.0
+autoTF = autoSecPerBar <= 1 ? "1S" : autoSecPerBar <= 5 ? "5S" : autoSecPerBar <= 15 ? "15S" : autoSecPerBar <= 30 ? "30S" : autoSecPerBar <= 60 ? "1" : autoSecPerBar <= 300 ? "5" : autoSecPerBar <= 900 ? "15" : autoSecPerBar <= 1800 ? "30" : "60"
+effectiveTF = autoResolution ? autoTF : lowerTF
+
+[iOpen, iHigh, iLow, iClose, iVolume] = request.security_lower_tf(syminfo.tickerid, effectiveTF, [open, high, low, close, volume])
+
+bodyHi = math.max(open, close)
+bodyLo = math.min(open, close)
+isBull = close >= open
+
+float biggestSize    = na
+float biggestPrice    = na
+bool  biggestIsAsk    = na
+bool  biggestInBody   = na
+
+bool anyAskAlert = false
+bool anyBidAlert = false
+
+nPrints = array.size(iClose)
+if nPrints > 0
+    for i = 0 to nPrints - 1
+        float pOpen  = array.get(iOpen, i)
+        float pClose = array.get(iClose, i)
+        float sz     = array.get(iVolume, i)
+
+        f_pushStat(sz)
+
+        bool isAsk  = pClose >= pOpen
+        float px    = pClose
+        bool inBody = px >= bodyLo and px <= bodyHi
+
+        bool pass = withinLoadWindow and f_passFilter(sz)
+
+        if pass
+            // Track the single biggest qualifying print of the bar
+            if na(biggestSize) or sz > biggestSize
+                biggestSize  := sz
+                biggestPrice := px
+                biggestIsAsk := isAsk
+                biggestInBody:= inBody
+
+            // ---- Alerts -----------------------------------------------------
+            // "pass" already means this print cleared Filter Min/Max;
+            // alertMinSize only adds an optional stricter override on top.
+            bool alertOk = alertMinSize <= 0 or sz >= alertMinSize
+            if alertOk
+                if isAsk and alertOnAsk
+                    anyAskAlert := true
+                if not isAsk and alertOnBid
+                    anyBidAlert := true
+
+            // ---- Markers (always plotted per qualifying print) -----------
+            float z = f_zScore(sz)
+            float sizeNorm = na(z) ? 0.5 : math.max(0.0, math.min(1.0, z / stdevMult))
+            int opacityPct = int(math.round(minOpacityPct + sizeNorm * (maxOpacityPct - minOpacityPct)))
+            color baseColor = isAsk ? askColor : bidColor
+            color fillColor = hollowFill ? color.new(baseColor, 100) : color.new(baseColor, f_transp(opacityPct))
+
+            bool okInsideBar = markerType != "Text" or not plotOnlyInsideBar or inBody
+
+            if okInsideBar
+                string txt = (showText or markerType == "Text") ? str.tostring(sz, "#") : ""
+                // Minimum/Maximum size inputs set the actual pixel-equivalent
+                // range fed into the label size bucket, so they now visibly
+                // change marker size. Label size is a FIXED pixel value in
+                // Pine — it never scales with zoom, and the label stays
+                // anchored to (bar_index, price), so it never drifts either.
+                // What can look like "bubbles growing on zoom-out" is bars
+                // packing closer together on screen, causing fixed-size
+                // bubbles to overlap more — smaller sizes here reduce that.
+                float pxLo = math.max(2.0, minMarkerPx * 5)
+                float pxHi = math.max(pxLo + 0.5, maxMarkerPx * 5)
+                float pxSize = pxLo + sizeNorm * (pxHi - pxLo)
+                string lblSize = f_bucketSize(pxSize)
+                // "Text size" controls the trade-size number's label
+                // independently of the bubble's own Minimum/Maximum size —
+                // it applies both when Marker = "Text" and when it's the
+                // number stacked on top of a Circle/Square/Diamond bubble.
+                string txtLblSize = f_bucketTextSize(textSize)
+
+                if markerType == "Text"
+                    label.new(bar_index, px, text=txt, style=label.style_label_center, size=txtLblSize,
+                         color=color.new(color.black, 100), textcolor=textColor)
+                else
+                    // Draw the bubble shape with no text of its own (a shape
+                    // style like circle/square/diamond renders its text beside
+                    // the icon, not inside it) ...
+                    label.new(bar_index, px, text="", style=f_labelStyle(), size=lblSize,
+                         color=fillColor, textcolor=textColor)
+                    // ... then stack the trade-size number, fully transparent
+                    // background, centered on the exact same point — it reads
+                    // as if the number were printed inside the bubble.
+                    if txt != ""
+                        label.new(bar_index, px, text=txt, style=label.style_label_center, size=txtLblSize,
+                             color=color.new(color.black, 100), textcolor=textColor)
+
+            // ---- Zones (non "Biggest only" path: draw immediately) -------
+            if zonesEnable and not biggestOnly
+                bool zoneGateOk = inBody or triggerOnShadow
+                string zoneMode = inBody ? bodyMode : shadowMode
+                if zoneGateOk and f_zoneAllowed(isAsk, isBull, zoneMode)
+                    color zColor = isAsk ? zoneAskColor : zoneBidColor
+                    b = box.new(bar_index, px, bar_index + zoneBars, px,
+                         border_color=color.new(zColor, f_transp(zoneOpacityPct)),
+                         bgcolor=color.new(zColor, f_transp(zoneOpacityPct)))
+                    array.push(zoneBoxes, b)
+
+// ---- Zones ("Biggest only" path: draw once per bar after the loop) --------
+if zonesEnable and biggestOnly and not na(biggestSize)
+    bool zoneGateOk = biggestInBody or triggerOnShadow
+    string zoneMode = biggestInBody ? bodyMode : shadowMode
+    if zoneGateOk and f_zoneAllowed(biggestIsAsk, isBull, zoneMode)
+        color zColor = biggestIsAsk ? zoneAskColor : zoneBidColor
+        b = box.new(bar_index, biggestPrice, bar_index + zoneBars, biggestPrice,
+             border_color=color.new(zColor, f_transp(zoneOpacityPct)),
+             bgcolor=color.new(zColor, f_transp(zoneOpacityPct)))
+        array.push(zoneBoxes, b)
+
+// -----------------------------------------------------------------------------
+// Alert conditions
+// -----------------------------------------------------------------------------
+alertcondition(anyAskAlert, title="Aggressive Buyers", message="Big Trades: aggressive buy detected")
+alertcondition(anyBidAlert, title="Aggressive Sellers", message="Big Trades: aggressive sell detected")
+
+if barstate.isrealtime and anyAskAlert
+    alert("Big Trades: aggressive BUY on " + syminfo.ticker, alert.freq_once_per_bar)
+if barstate.isrealtime and anyBidAlert
+    alert("Big Trades: aggressive SELL on " + syminfo.ticker, alert.freq_once_per_bar)
