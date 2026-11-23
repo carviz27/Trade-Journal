@@ -60,7 +60,7 @@ tradeDir = input.string("Both", "Direction", options = ["Both", "Long only", "Sh
 nTradeLevels = input.int(3, "POCs per timeframe", minval = 1, maxval = 20, group = grpStrat,
      tooltip = "Quantos POCs de cada timeframe (os mais próximos do preço) entram na estratégia. Todos os POCs são tratados por igual. Só são negociados os POCs que estão LIGADOS nos grupos 'Timeframes - New / Naked / Tapped': o que desligares deixa de aparecer E deixa de ser negociado.")
 grpZone = "POC zones (clusters)"
-clusterPct = input.float(0.4, "Cluster distance %", minval = 0.0, step = 0.05, group = grpZone,
+clusterPct = input.float(0.5, "Cluster distance %", minval = 0.0, step = 0.05, group = grpZone,
      tooltip = "POCs a menos desta distância (%) do POC vizinho juntam-se na mesma zona. 0 = cada POC é uma zona sozinho (comportamento antigo).")
 maxZonePct = input.float(1.5, "Max zone width %", minval = 0.0, step = 0.1, group = grpZone,
      tooltip = "Largura máxima de uma zona, para os POCs não se encadearem numa zona gigante.")
@@ -77,7 +77,7 @@ grpRsi = "RSI filter"
 useRsi = input.bool(true, "Require RSI", group = grpRsi,
      tooltip = "ON: só entra quando o preço toca a zona E o RSI (dos timeframes ligados) está oversold (long) ou overbought (short). A entrada é a mercado, na abertura da barra seguinte do gráfico - quanto menor o gráfico, mais precisa. OFF: ordens limit nas zonas, sem filtro.")
 rsi1On  = input.bool(true,  "1m",  group = grpRsi, inline = "rsiTF")
-rsi5On  = input.bool(false, "5m",  group = grpRsi, inline = "rsiTF")
+rsi5On  = input.bool(true,  "5m",  group = grpRsi, inline = "rsiTF")
 rsi15On = input.bool(false, "15m", group = grpRsi, inline = "rsiTF")
 rsi30On = input.bool(false, "30m", group = grpRsi, inline = "rsiTF",
      tooltip = "Timeframes do RSI a usar (podes ligar vários). O RSI de cada um é avaliado minuto a minuto, em formação (o valor que verias ao vivo nesse timeframe).")
@@ -102,8 +102,8 @@ liqShortSym = input.symbol("", "Custom short liquidations symbol", group = grpLi
      tooltip = "Só para 'Custom'. Ex.: BYBIT:BTCUSDT.P_LQBUY (shorts liquidados = compra forçada).")
 liqUnits = input.string("Auto", "Values are in", options = ["Auto", "USD", "BTC"], group = grpLiq,
      tooltip = "Consoante a exchange, o TradingView dá as liquidações em BTC ou em USD/USDT. Auto: deteta pelo tipo de volume do símbolo de liquidações e converte para USD (BTC x preço) quando é preciso.")
-liqMin = input.float(20000000.0, "Minimum liquidations (USD)", minval = 0, step = 1000000, group = grpLiq)
-liq1On  = input.bool(false, "1m",  group = grpLiq, inline = "liqTF")
+liqMin = input.float(5000000.0, "Minimum liquidations (USD)", minval = 0, step = 1000000, group = grpLiq)
+liq1On  = input.bool(true,  "1m",  group = grpLiq, inline = "liqTF")
 liq5On  = input.bool(true,  "5m",  group = grpLiq, inline = "liqTF")
 liq15On = input.bool(false, "15m", group = grpLiq, inline = "liqTF")
 liq30On = input.bool(false, "30m", group = grpLiq, inline = "liqTF")
@@ -111,7 +111,7 @@ liq60On = input.bool(false, "1h",  group = grpLiq, inline = "liqTF",
      tooltip = "Timeframe das velas de liquidações (1m/5m/15m/30m/1h), como no indicador Liquidations nesse timeframe. Podes ligar vários.")
 liqCombine = input.string("Any", "Combine timeframes", options = ["Any", "All"], group = grpLiq,
      tooltip = "Any: basta UM dos timeframes ligados cumprir. All: TODOS têm de cumprir.")
-liqLookback = input.int(3, "Bars back", minval = 0, maxval = 20, group = grpLiq,
+liqLookback = input.int(6, "Bars back", minval = 0, maxval = 20, group = grpLiq,
      tooltip = "A trade abre se a vela de liquidações ATUAL ou uma das N velas anteriores (do timeframe escolhido, ex.: 5m) tiver liquidações >= ao mínimo. Cada vela é contada sozinha (não se somam velas). 0 = só a vela atual.")
 
 reuseTouched = input.bool(true, "Re-use touched POCs", group = grpStrat,
@@ -120,7 +120,7 @@ rearmPct = input.float(0.5, "Re-arm distance %", minval = 0.0, step = 0.05, grou
      tooltip = "Distância a que o preço tem de se afastar de um POC já negociado para ele voltar a receber ordem. Evita entrar várias vezes seguidas no mesmo toque.")
 slPct = input.float(1.0, "Stop loss % (beyond far edge of zone)", minval = 0.0, step = 0.1, group = grpStrat,
      tooltip = "O stop fica esta % para lá da extremidade OPOSTA da zona. 0 = sem stop loss.")
-tpPct = input.float(4.0, "Take profit %", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "0 = sem take profit (sai só por stop ou inversão).")
+tpPct = input.float(2.0, "Take profit %", minval = 0.0, step = 0.1, group = grpStrat, tooltip = "0 = sem take profit (sai só por stop ou inversão).")
 showDiag = input.bool(true, "Diagnostic table", group = grpStrat,
      tooltip = "Mostra no canto inferior direito o estado dos filtros na última vela: zonas armadas, sinais à espera, RSI e a maior vela de liquidações (longs/shorts) - para perceber porque é que uma trade não abriu.")
 tradeFrom = input.time(timestamp("2023-09-01T01:00:00"), "Trade from", group = grpStrat)
@@ -165,7 +165,7 @@ nakedUpdateTick = input.bool(false, "Update on every tick", group = grpNaked)
 
 tappedColor  = input.color(color.new(#9c87be, 0), "Tapped - color", group = grpTapped, inline = "tp0")
 tappedShow1D = input.bool(true, "1D", group = grpTapped, inline = "tp1")
-tappedShow2D = input.bool(true, "2D", group = grpTapped, inline = "tp1")
+tappedShow2D = input.bool(false, "2D", group = grpTapped, inline = "tp1")
 tappedShow3D = input.bool(true, "3D", group = grpTapped, inline = "tp1")
 tappedShow5D = input.bool(true, "5D", group = grpTapped, inline = "tp1")
 tappedShow1W = input.bool(true, "1W", group = grpTapped, inline = "tp2")
