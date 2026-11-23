@@ -1342,13 +1342,34 @@ if nCand > 0
     array.push(zCnt, curCnt)
     array.push(zMem, curMem)
 
-// Zona alargada pelo buffer do seu lado: zona abaixo do preço = long, acima =
-// short (decidido pela zona sem buffer). Devolve [lo, hi].
-zoneBuffered(float rawLo, float rawHi) =>
-    isL = rawHi < close
-    isS = rawLo > close
-    upP = isL ? bufLongUp : isS ? bufShortUp : math.max(bufLongUp, bufShortUp)
-    dnP = isL ? bufLongDn : isS ? bufShortDn : math.max(bufLongDn, bufShortDn)
+// Lado de cada zona (long/short). Decidido quando o preço está FORA da zona
+// (abaixo do preço = long, acima = short) e MEMORIZADO: quando o preço entra
+// na zona, ela mantém o lado que tinha (antes ficava "sem lado"/amarela e
+// deixava de dar entrada).
+var map<string, bool> zoneSideMap = map.new<string, bool>()
+zoneKey(float rawLo, float rawHi) =>
+    "R|" + str.tostring(rawLo, format.mintick) + "-" + str.tostring(rawHi, format.mintick)
+zoneIsLong(float rawLo, float rawHi) =>
+    k = zoneKey(rawLo, rawHi)
+    bool res = false
+    if rawHi < close or rawLo > close
+        res := rawHi < close
+        map.put(zoneSideMap, k, res)
+    else
+        // Preço dentro da zona: usa o lado memorizado; se nunca foi visto
+        // fora, decide pela metade da zona onde está o preço.
+        res := map.contains(zoneSideMap, k) ? map.get(zoneSideMap, k) : close > (rawLo + rawHi) / 2
+    res
+
+// Atualiza o lado de todas as zonas em todas as velas (mesmo com posição).
+if array.size(zLo) > 0
+    for z = 0 to array.size(zLo) - 1
+        zoneIsLong(array.get(zLo, z), array.get(zHi, z))
+
+// Zona alargada pelo buffer do seu lado. Devolve [lo, hi].
+zoneBuffered(float rawLo, float rawHi, bool isL) =>
+    upP = isL ? bufLongUp : bufShortUp
+    dnP = isL ? bufLongDn : bufShortDn
     [rawLo * (1 - dnP / 100), rawHi * (1 + upP / 100)]
 
 // 4) Uma ordem por zona elegível - só quando NÃO há posição aberta.
@@ -1370,11 +1391,14 @@ if nZones > 0 and flat
         // Zona alargada pelo buffer do seu lado (long/short, cima/baixo).
         rawLo = array.get(zLo, z)
         rawHi = array.get(zHi, z)
-        [lo, hi] = zoneBuffered(rawLo, rawHi)
+        isLong = zoneIsLong(rawLo, rawHi)
+        [lo, hi] = zoneBuffered(rawLo, rawHi, isLong)
         cnt = array.get(zCnt, z)
         inside = close >= lo and close <= hi
-        if cnt >= minPocsZone and not inside
-            isLong = rawHi < close
+        // Modelo novo: a zona continua armada (com o seu lado) mesmo com o
+        // preço lá dentro. Modelo antigo (ordens limit): continua a não armar
+        // zonas com o preço dentro.
+        if cnt >= minPocsZone and (newEntry or not inside)
             entryPx = entryMode == "Zone middle" ? (lo + hi) / 2 : (isLong ? hi : lo)
             zid = "Z|" + str.tostring(lo, format.mintick) + "-" + str.tostring(hi, format.mintick) + "|" + str.tostring(cnt)
             if ((isLong and allowLong) or (not isLong and allowShort)) and not map.contains(traded, zid) and not array.includes(newBase, zid)
@@ -1572,8 +1596,9 @@ if barstate.islast
             if cnt >= minPocsZone
                 rawLo = array.get(zLo, z)
                 rawHi = array.get(zHi, z)
-                [lo, hi] = zoneBuffered(rawLo, rawHi)
-                col = rawHi < close ? color.new(color.teal, 80) : rawLo > close ? color.new(color.red, 80) : color.new(color.orange, 80)
+                zl = zoneIsLong(rawLo, rawHi)
+                [lo, hi] = zoneBuffered(rawLo, rawHi, zl)
+                col = zl ? color.new(color.teal, 80) : color.new(color.red, 80)
                 array.push(zoneBoxes, box.new(bar_index - 30, hi, bar_index + 10, lo, border_color = color.new(col, 40),
                      bgcolor = col, extend = extend.right, text = str.tostring(cnt) + " POC" + (cnt > 1 ? "s" : ""),
                      text_color = color.gray, text_size = size.small, text_halign = text.align_right))
