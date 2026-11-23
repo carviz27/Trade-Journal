@@ -176,6 +176,13 @@ lineThickness = input.int(1, "Line thickness", minval = 0, maxval = 4, group = g
 calcTF = input.timeframe("1D", "Timeframe", group = grpCalc)
 waitForClose = input.bool(false, "Wait for timeframe closes", group = grpCalc)
 
+grpBE = "Break-even"
+useBE = input.bool(true, "Move stop to break-even", group = grpBE,
+     tooltip = "Depois de N velas de 1 minuto SEGUIDAS a fechar em lucro (close acima da entrada num long / abaixo num short - a cor da vela não interessa), o stop loss passa para o preço de entrada. Se uma vela fechar sem lucro, a contagem recomeça.")
+beBars = input.int(5, "Consecutive 1m candles in profit", minval = 1, maxval = 120, group = grpBE)
+beOffsetPct = input.float(0.0, "BE offset %", minval = 0.0, step = 0.01, group = grpBE,
+     tooltip = "0 = stop exatamente no preço de entrada. Ex.: 0.05 = stop 0.05% para o lado do lucro (cobre comissões).")
+
 // ---------------------------------------------------------------------------
 // Só BTC
 // ---------------------------------------------------------------------------
@@ -625,6 +632,7 @@ var array<float>  lockPx   = array.new<float>()
 // executada, para cada nova entrada na mesma zona ter um ID diferente.
 var map<string, bool> filled = map.new<string, bool>()
 var map<string, int>  fillCnt = map.new<string, int>()
+var map<string, float> tpById = map.new<string, float>()
 var bool needSel = true
 var array<string> pendIds  = array.new<string>()
 var array<string> pendBase = array.new<string>()
@@ -857,7 +865,7 @@ m1H = array.new<float>()
 m1L = array.new<float>()
 m1C = array.new<float>()
 m1T = array.new<int>()
-if useConfirm
+if useConfirm or useBE
     if chartSec > 60
         m1H := request.security_lower_tf(syminfo.tickerid, "1", high)
         m1L := request.security_lower_tf(syminfo.tickerid, "1", low)
@@ -981,6 +989,7 @@ if useConfirm
                         strategy.entry(eid, lg ? strategy.long : strategy.short, qty = strategy.equity * basePct / 100 * mult / close,
                              comment = (lg ? "L " : "S ") + eid + (useRsi ? " RSI" + rsiLbl : "") + (useLiq ? " LIQ" + liqLbl : ""))
                         strategy.exit("X|" + eid, from_entry = eid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+                        map.put(tpById, eid, tp)
                         map.put(filled, eid, true)
                         map.put(fillCnt, b, (map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0) + 1)
                         lockKey(b, array.get(trgEntry, i))
@@ -1168,6 +1177,7 @@ if array.size(newIds) > 0
                  comment = (isLong ? "L " : "S ") + oid + cmt)
             if not na(sl) or not na(tp)
                 strategy.exit("X|" + oid, from_entry = oid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
+            map.put(tpById, oid, tp)
             array.push(placedNow, oid)
         array.push(pendLong, isLong)
         array.push(pendSL, sl)
@@ -1184,6 +1194,41 @@ if useConfirm and array.size(prevPend) > 0
         if not array.includes(placedNow, oid) and not map.contains(filled, oid)
             strategy.cancel(oid)
             strategy.cancel("X|" + oid)
+
+// Break-even: N velas de 1m SEGUIDAS a fechar em lucro -> stop no preço de
+// entrada (+ offset). Conta só velas de 1m que abriram depois da entrada.
+var string beTradeId = ""
+var int beCount = 0
+var bool beDone = false
+var int beLastT = 0
+if useBE and strategy.opentrades > 0
+    tid = strategy.opentrades.entry_id(0)
+    if tid != beTradeId
+        beTradeId := tid
+        beCount := 0
+        beDone := false
+        beLastT := 0
+    if not beDone
+        ePx = strategy.opentrades.entry_price(0)
+        eT  = strategy.opentrades.entry_time(0)
+        isL = strategy.position_size > 0
+        nM = array.size(m1C)
+        if nM > 0
+            for k = 0 to nM - 1
+                mt = array.get(m1T, k)
+                if mt >= eT and mt > beLastT and not beDone
+                    mc = array.get(m1C, k)
+                    inProfit = isL ? mc > ePx : mc < ePx
+                    beCount := inProfit ? beCount + 1 : 0
+                    beLastT := mt
+                    if beCount >= beBars
+                        beDone := true
+        if beDone
+            bePx = isL ? ePx * (1 + beOffsetPct / 100) : ePx * (1 - beOffsetPct / 100)
+            float keepTP = map.contains(tpById, tid) ? map.get(tpById, tid) : na
+            strategy.exit("X|" + tid, from_entry = tid, stop = bePx, limit = keepTP, comment_loss = "BE", comment_profit = "TP")
+else if strategy.opentrades == 0
+    beTradeId := ""
 
 // Fecha tudo fora da janela de trading.
 if not inWindow and strategy.position_size != 0
