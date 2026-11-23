@@ -1352,13 +1352,27 @@ zoneKey(float rawLo, float rawHi) =>
 zoneIsLong(float rawLo, float rawHi) =>
     k = zoneKey(rawLo, rawHi)
     bool res = false
-    if rawHi < close or rawLo > close
-        res := rawHi < close
-        map.put(zoneSideMap, k, res)
+    if map.contains(zoneSideMap, k)
+        // Lado já conhecido: só muda quando o preço sai da zona JÁ COM O
+        // BUFFER desse lado (estar dentro do buffer não faz flip).
+        prev = map.get(zoneSideMap, k)
+        upP = prev ? bufLongUp : bufShortUp
+        dnP = prev ? bufLongDn : bufShortDn
+        bLo = rawLo * (1 - dnP / 100)
+        bHi = rawHi * (1 + upP / 100)
+        if bHi < close or bLo > close
+            res := bHi < close
+            map.put(zoneSideMap, k, res)
+        else
+            res := prev
     else
-        // Preço dentro da zona: usa o lado memorizado; se nunca foi visto
-        // fora, decide pela metade da zona onde está o preço.
-        res := map.contains(zoneSideMap, k) ? map.get(zoneSideMap, k) : close > (rawLo + rawHi) / 2
+        if rawHi < close or rawLo > close
+            res := rawHi < close
+            map.put(zoneSideMap, k, res)
+        else
+            // Preço dentro de uma zona nunca vista fora: decide pela metade
+            // da zona onde está o preço.
+            res := close > (rawLo + rawHi) / 2
     res
 
 // Atualiza o lado de todas as zonas em todas as velas (mesmo com posição).
