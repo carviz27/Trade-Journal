@@ -248,6 +248,8 @@ bouncePattern = input.string("Relaxed", "Bounce pattern", options = ["Relaxed", 
      tooltip = "SHORT: primeiro uma vela VERDE tem de tocar a zona. Relaxed: depois disso, a PRIMEIRA vela VERMELHA que fecha abaixo da zona (com buffer) dá entrada, mesmo que não seja a vela seguinte (ex.: descida em várias velas). Strict: a vela vermelha tem de ser exatamente a seguinte à vela verde que tocou. LONG: espelho (vela vermelha toca, depois vela verde fecha acima).")
 showReasons = input.bool(false, "Show 'no entry' reasons", group = grpPat,
      tooltip = "Quando uma vela de 1m fecha para lá da zona (no sentido da trade) e a trade NÃO abre, desenha uma etiqueta '✗' nessa vela com o motivo.")
+intrabarCount = input.int(100000, "Intrabar bars to load (5s/1m data)", minval = 1000, maxval = 200000, step = 1000, group = "Intrabar data",
+     tooltip = "Quantas velas intrabar (prints de 5s/15s e velas de 1m) o TradingView carrega. Sem isto carregava só tantas como as velas do gráfico (~1 dia de prints de 5s) e no Bar Replay mais antigo não havia bolhas nem absorção. Máximo: 100.000 (Basic a Premium), 125.000 (Expert), 200.000 (Ultimate). Mesmo no máximo, 5s cobrem ~5.8 dias, 15s ~17 dias e 1m ~69 dias a contar de HOJE.")
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -908,10 +910,10 @@ if useLiq
     lST = array.new<int>()
     lSV = array.new<float>()
     if timeframe.in_seconds(timeframe.period) > 60
-        lLT := request.security_lower_tf(lqLongTicker,  "1", time,   ignore_invalid_symbol = true)
-        lLV := request.security_lower_tf(lqLongTicker,  "1", volume, ignore_invalid_symbol = true)
-        lST := request.security_lower_tf(lqShortTicker, "1", time,   ignore_invalid_symbol = true)
-        lSV := request.security_lower_tf(lqShortTicker, "1", volume, ignore_invalid_symbol = true)
+        lLT := request.security_lower_tf(lqLongTicker,  "1", time,   ignore_invalid_symbol = true, calc_bars_count = intrabarCount)
+        lLV := request.security_lower_tf(lqLongTicker,  "1", volume, ignore_invalid_symbol = true, calc_bars_count = intrabarCount)
+        lST := request.security_lower_tf(lqShortTicker, "1", time,   ignore_invalid_symbol = true, calc_bars_count = intrabarCount)
+        lSV := request.security_lower_tf(lqShortTicker, "1", volume, ignore_invalid_symbol = true, calc_bars_count = intrabarCount)
     else
         [lt1, lv1] = request.security(lqLongTicker,  "1", [time, volume], ignore_invalid_symbol = true)
         [st1, sv1] = request.security(lqShortTicker, "1", [time, volume], ignore_invalid_symbol = true)
@@ -1015,7 +1017,7 @@ if useAbs and absTolMode == "ATR"
     absAtr := request.security(syminfo.tickerid, absAtrTF, ta.atr(absAtrLen))
 
 if useAbs
-    [pO, pH, pL, pC, pV, pT] = request.security_lower_tf(syminfo.tickerid, absEffTF, [open, high, low, close, volume, time])
+    [pO, pH, pL, pC, pV, pT] = request.security_lower_tf(syminfo.tickerid, absEffTF, [open, high, low, close, volume, time], calc_bars_count = intrabarCount)
     nP = array.size(pC)
     if nP > 0
         for i = 0 to nP - 1
@@ -1101,11 +1103,11 @@ m1T = array.new<int>()
 m1O = array.new<float>()
 if useTrig or useBE
     if chartSec > 60
-        m1H := request.security_lower_tf(syminfo.tickerid, "1", high)
-        m1L := request.security_lower_tf(syminfo.tickerid, "1", low)
-        m1C := request.security_lower_tf(syminfo.tickerid, "1", close)
-        m1O := request.security_lower_tf(syminfo.tickerid, "1", open)
-        m1T := request.security_lower_tf(syminfo.tickerid, "1", time)
+        m1H := request.security_lower_tf(syminfo.tickerid, "1", high, calc_bars_count = intrabarCount)
+        m1L := request.security_lower_tf(syminfo.tickerid, "1", low, calc_bars_count = intrabarCount)
+        m1C := request.security_lower_tf(syminfo.tickerid, "1", close, calc_bars_count = intrabarCount)
+        m1O := request.security_lower_tf(syminfo.tickerid, "1", open, calc_bars_count = intrabarCount)
+        m1T := request.security_lower_tf(syminfo.tickerid, "1", time, calc_bars_count = intrabarCount)
     else
         array.push(m1H, high)
         array.push(m1L, low)
