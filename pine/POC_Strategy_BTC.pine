@@ -236,17 +236,17 @@ slBufferPct = input.float(0.0, "Stop buffer % (below the low / above the high)",
 bounceBeyond = input.bool(true, "Bounce candle must close beyond the zone", group = grpEntry,
      tooltip = "Padrão de entrada (long): uma vela de 1m VERMELHA toca a zona (pode deixar wick) e a vela SEGUINTE fecha VERDE -> entrada. ON: essa vela verde também tem de fechar acima do topo da zona. Short: vela VERDE toca a zona e a seguinte fecha VERMELHA (abaixo da zona, se ON). Uma vela que toca e fecha logo do outro lado NÃO dá entrada.")
 grpBuf = "Zone buffer % (alarga a zona de POCs)"
-bufLongUp   = input.float(0.1, "Long zones: above %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufL",
+bufLongUp   = input.float(0.05, "Long zones: above %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufL",
      tooltip = "Zonas de LONG (abaixo do preço): quanto a zona sobe acima do topo / desce abaixo do fundo. O toque, o fecho para lá da zona e as caixas usam a zona alargada. 0 = sem buffer desse lado.")
-bufLongDn   = input.float(0.1, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufL")
-bufShortUp  = input.float(0.1, "Short zones: above %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS",
+bufLongDn   = input.float(0.071, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufL")
+bufShortUp  = input.float(0.071, "Short zones: above %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS",
      tooltip = "Zonas de SHORT (acima do preço): quanto a zona sobe acima do topo / desce abaixo do fundo.")
-bufShortDn  = input.float(0.1, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS")
+bufShortDn  = input.float(0.05, "below %", minval = 0.0, step = 0.01, group = grpBuf, inline = "bufS")
 
 grpPat = "Bounce pattern & diagnostics"
 bouncePattern = input.string("Relaxed", "Bounce pattern", options = ["Relaxed", "Strict (next candle)"], group = grpPat,
      tooltip = "SHORT: primeiro uma vela VERDE tem de tocar a zona. Relaxed: depois disso, a PRIMEIRA vela VERMELHA que fecha abaixo da zona (com buffer) dá entrada, mesmo que não seja a vela seguinte (ex.: descida em várias velas). Strict: a vela vermelha tem de ser exatamente a seguinte à vela verde que tocou. LONG: espelho (vela vermelha toca, depois vela verde fecha acima).")
-showReasons = input.bool(true, "Show 'no entry' reasons", group = grpPat,
+showReasons = input.bool(false, "Show 'no entry' reasons", group = grpPat,
      tooltip = "Quando uma vela de 1m fecha para lá da zona (no sentido da trade) e a trade NÃO abre, desenha uma etiqueta '✗' nessa vela com o motivo.")
 
 // ---------------------------------------------------------------------------
