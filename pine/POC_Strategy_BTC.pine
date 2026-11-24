@@ -252,6 +252,8 @@ flipPct = input.float(0.5, "Flip distance % (zone broken -> opposite side)", min
      tooltip = "Quando o preço FURA uma zona (ex.: fecha acima de uma zona de short + buffer), a zona fica DESATIVADA (cinzenta, sem trades). Só passa a ser do lado oposto (long) quando o preço fechar pelo menos esta % para lá dela. Assim, quebrar uma zona de short não dá logo um long.")
 liqMode = input.string("Bars back OR in zone", "Liquidations rule", options = ["Bars back", "In zone (since touch)", "Bars back OR in zone"], group = grpLiq,
      tooltip = "Bars back: uma vela de liquidações (atual ou N anteriores) >= mínimo. In zone: a SOMA das liquidações desde o minuto em que o preço tocou o POC (enquanto está na zona) até agora >= mínimo. OR: basta uma das duas. (No modelo antigo 'At zone' usa sempre Bars back.)")
+sameCandleRev = input.bool(true, "Touch candle can reverse (red at touch -> closes green)", group = grpPat,
+     tooltip = "LONG: uma vela que ABRE acima do POC, desce até ao POC (estava vermelha nesse momento) e depois FECHA VERDE acima da zona (com buffer) dá entrada logo nessa vela. Uma vela que abre já no POC ou abaixo não conta. SHORT: espelho (abre abaixo do POC, sobe até ao POC, fecha vermelha abaixo da zona).")
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -1283,7 +1285,12 @@ if useTrig
                             // 'bounceBeyond'.
                             bool bounceCandle = lg ? mC > mO : mC < mO
                             bool beyondOk = not bounceBeyond or (lg ? mC > array.get(trgHi, i) : mC < array.get(trgLo, i))
-                            bool patOk = array.get(trgPrevRT, i)
+                            // Vela de toque vista antes OU (opção) esta mesma vela abriu
+                            // acima do POC (long), tocou-o (estava vermelha) e reverteu
+                            // para verde. Short: espelho.
+                            ep0 = array.get(trgEntry, i)
+                            bool sameC = sameCandleRev and (lg ? (mL <= ep0 and mO > ep0) : (mH >= ep0 and mO < ep0))
+                            bool patOk = array.get(trgPrevRT, i) or sameC
                             ext = array.get(trgExt, i)
                             sl := lg ? ext * (1 - slBufferPct / 100) : ext * (1 + slBufferPct / 100)
                             bool slOkN = lg ? sl < mC : sl > mC
