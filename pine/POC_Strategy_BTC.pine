@@ -1237,7 +1237,11 @@ if useTrig
                     array.set(trgExt, i, lg ? math.min(array.get(trgExt, i), mL) : math.max(array.get(trgExt, i), mH))
                     sl = array.get(trgSL, i)
                     broken = not na(sl) and (lg ? mL <= sl : mH >= sl)
-                    if mT > array.get(trgExp, i) or broken
+                    // Modelo novo: vela de 1m FECHA para lá da zona + buffer no lado
+                    // errado (long: abaixo do fundo; short: acima do topo) -> zona
+                    // desativada (cinzenta) -> o sinal é cancelado.
+                    bool closedWrong = newEntry and (lg ? mC < array.get(trgLo, i) : mC > array.get(trgHi, i))
+                    if mT > array.get(trgExp, i) or broken or closedWrong
                         trgRemove(i)
             // Filtros: no modelo novo basta confirmarem uma vez desde o toque
             // (até ao limite 'Minutes after touch...' ou até à vela de entrada).
