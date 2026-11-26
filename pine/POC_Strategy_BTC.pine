@@ -3,7 +3,8 @@ strategy("POC Strategy BTC (1D-1M)", shorttitle = "POC Strat", overlay = true, m
      initial_capital = 10000, currency = currency.USD,
      default_qty_type = strategy.percent_of_equity, default_qty_value = 5,
      pyramiding = 1, commission_type = strategy.commission.percent, commission_value = 0.05,
-     slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
+     slippage = 2, calc_on_every_tick = false, process_orders_on_close = false,
+     margin_long = 1, margin_short = 1)
 
 // ============================================================================
 // Estratégia baseada no indicador "POC Multi-Timeframe (1D-1M)".
@@ -254,6 +255,12 @@ liqMode = input.string("Bars back OR in zone", "Liquidations rule", options = ["
      tooltip = "Bars back: uma vela de liquidações (atual ou N anteriores) >= mínimo. In zone: a SOMA das liquidações desde o minuto em que o preço tocou o POC (enquanto está na zona) até agora >= mínimo. OR: basta uma das duas. (No modelo antigo 'At zone' usa sempre Bars back.)")
 sameCandleRev = input.bool(true, "Touch candle can reverse (red at touch -> closes green)", group = grpPat,
      tooltip = "LONG: uma vela que ABRE acima do POC, desce até ao POC (estava vermelha nesse momento) e depois FECHA VERDE acima da zona (com buffer) dá entrada logo nessa vela. Uma vela que abre já no POC ou abaixo não conta. SHORT: espelho (abre abaixo do POC, sobe até ao POC, fecha vermelha abaixo da zona).")
+grpSize = "Position sizing"
+sizingMode = input.string("Risk per trade %", "Sizing", options = ["Risk per trade %", "% equity (Base size)"], group = grpSize,
+     tooltip = "Risk per trade %: a quantidade é calculada para que, se o STOP for atingido, se perca esta % da conta (quantidade = conta x risco% / distância ao stop). No TP de 2R ganha-se 2x essa %. % equity: modo antigo, posição = 'Base size (% equity)' da conta.")
+riskPct = input.float(3.0, "Risk per trade %", minval = 0.01, maxval = 100, step = 0.1, group = grpSize)
+maxLev = input.float(20, "Max leverage (x)", minval = 1, maxval = 100, step = 1, group = grpSize,
+     tooltip = "Limite do tamanho da posição: valor da posição <= conta x alavancagem. Com stops muito curtos o risco % pode pedir posições enormes - este limite corta-as (nesse caso arrisca-se menos que a % escolhida).")
 
 // ---------------------------------------------------------------------------
 // Só BTC
@@ -1110,6 +1117,16 @@ liqZoneCheck(bool lg, int tFrom, int mT) =>
                 sum += array.get(bufV, i)
     [sum >= liqMin, sum >= liqMin ? " zone:" + str.tostring(sum / 1000000, "#.#") + "M" : ""]
 
+// Quantidade da posição: por risco (distância ao stop) ou % da conta,
+// limitada pela alavancagem máxima.
+calcQty(float px, float sl, float mult) =>
+    float q = na
+    if sizingMode == "Risk per trade %" and not na(sl) and math.abs(px - sl) > 0
+        q := strategy.equity * riskPct / 100 / math.abs(px - sl)
+    else
+        q := strategy.equity * basePct / 100 * mult / px
+    math.min(q, strategy.equity * maxLev / px)
+
 useConfirm = useRsi or useLiq or useAbs
 newEntry = entryModel == "Close beyond zone (1m)"
 // O modelo novo usa sempre o caminho "toque -> sinal -> entrada" (sem ordens
@@ -1328,7 +1345,7 @@ if useTrig
                             cnt = array.get(trgCnt, i)
                             eid = b + "#" + str.tostring(map.contains(fillCnt, b) ? map.get(fillCnt, b) : 0)
                             mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
-                            strategy.entry(eid, lg ? strategy.long : strategy.short, qty = strategy.equity * basePct / 100 * mult / mC,
+                            strategy.entry(eid, lg ? strategy.long : strategy.short, qty = calcQty(mC, sl, mult),
                                  comment = (lg ? "L " : "S ") + eid + array.get(trgLbl, i))
                             strategy.exit("X|" + eid, from_entry = eid, stop = sl, limit = tp, comment_loss = "SL", comment_profit = "TP")
                             map.put(tpById, eid, tp)
@@ -1535,7 +1552,7 @@ if nZones > 0 and flat
                 float sl = slPct > 0 ? (isLong ? farEdge * (1 - slPct / 100) : farEdge * (1 + slPct / 100)) : na
                 float tp = tpPct > 0 ? (isLong ? entryPx * (1 + tpPct / 100) : entryPx * (1 - tpPct / 100)) : na
                 mult = sizeByCount ? math.min(cnt, maxSizeMult) : 1
-                qty = strategy.equity * basePct / 100 * mult / entryPx
+                qty = calcQty(entryPx, sl, mult)
                 array.push(newIds, zid + "#" + str.tostring(map.contains(fillCnt, zid) ? map.get(fillCnt, zid) : 0))
                 array.push(newBase, zid)
                 array.push(newPx, entryPx)
